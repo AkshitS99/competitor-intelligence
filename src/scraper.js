@@ -6,21 +6,28 @@
  * Orchestration Module
  *
  * Responsibilities:
- *   - Bootstrap required project directories (output, logs, assets, reports)
- *   - Initialize/update output/ads.json with run status
- *   - Read competitor list (and target country) from config/competitors.json
- *   - Launch a realistic desktop Chromium browser via Playwright
- *   - Delegate ALL Meta Ad Library interaction to ./metaAdLibrary
- *   - Loop through competitors, search each brand, wait for ads, log results
- *   - Cleanly shut down the browser
+ * - Bootstrap required project directories (output, logs, assets, reports,
+ *   output/network)
+ * - Initialize/update output/ads.json with run status
+ * - Read competitor list (and target country) from config/competitors.json
+ * - Launch a realistic desktop Chromium browser via Playwright
+ * - Delegate ALL Meta Ad Library interaction to ./metaAdLibrary
+ * - Attach ./networkInterceptor once per page to passively capture Meta
+ *   Ad Library GraphQL/XHR traffic alongside the DOM-driven workflow
+ * - Loop through competitors, search each brand, wait for ads, log results
+ * - Persist captured network traffic per competitor for pagination/edge
+ *   counts and DOM-failure debugging
+ * - Cleanly shut down the browser
  *
  * This module intentionally contains NO Meta Ad Library navigation logic.
  * All page-level interaction (launch, cookies, country selection, search,
  * waiting for ads, popups) lives in ./metaAdLibrary and is only invoked
- * here.
+ * here. Network capture is similarly delegated to ./networkInterceptor —
+ * this module only attaches it, clears it per competitor, and persists
+ * whatever it captured.
  *
  * Usage:
- *   node src/scraper.js
+ * node src/scraper.js
  */
 
 'use strict';
@@ -30,6 +37,11 @@ const fs = require('fs-extra');
 const { chromium } = require('playwright');
 
 const metaAdLibrary = require('./metaAdLibrary');
+const {
+  attachNetworkInterceptor,
+  getCapturedResponses,
+  clearCapturedResponses,
+} = require('./networkInterceptor');
 
 // ---------------------------------------------------------------------------
 // Constants & Paths
@@ -43,6 +55,7 @@ const PATHS = {
   logs: path.join(ROOT_DIR, 'logs'),
   assets: path.join(ROOT_DIR, 'assets'),
   reports: path.join(ROOT_DIR, 'reports'),
+  network: path.join(ROOT_DIR, 'output', 'network'),
   adsJson: path.join(ROOT_DIR, 'output', 'ads.json'),
   logFile: path.join(ROOT_DIR, 'logs', 'scraper.log'),
 };
@@ -110,6 +123,26 @@ const Logger = {
 };
 
 // ---------------------------------------------------------------------------
+// Internal utility: filesystem-safe slug for per-competitor network files
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function toSlug(value) {
+  if (!value) return 'unknown';
+  return (
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 80) || 'unknown'
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Bootstrap: ensure required project directories exist
 // ---------------------------------------------------------------------------
 
@@ -118,13 +151,13 @@ const Logger = {
  * scraper runs. Safe to call repeatedly (idempotent).
  */
 async function ensureDirectories() {
-  const requiredDirs = [PATHS.output, PATHS.logs, PATHS.assets, PATHS.reports];
+  const requiredDirs = [PATHS.output, PATHS.logs, PATHS.assets, PATHS.reports, PATHS.network];
 
   for (const dir of requiredDirs) {
     await fs.ensureDir(dir);
   }
 
-  await Logger.info('Verified/created required directories: output/, logs/, assets/, reports/');
+  await Logger.info('Verified/created required directories: output/, logs/, assets/, reports/, output/network/');
 }
 
 // ---------------------------------------------------------------------------
@@ -158,11 +191,12 @@ async function initializeAdsOutput() {
 
 /**
  * Overwrites output/ads.json with the current run status and the
- * accumulated per-competitor results (search/ad-detection status only —
- * no ad content, since extraction is out of scope for this module).
+ * accumulated per-competitor results (search/ad-detection status, plus a
+ * lightweight network-capture summary — raw GraphQL payloads themselves
+ * live under output/network/, not inline in ads.json).
  *
  * @param {'initialized'|'running'|'completed'|'failed'} status
- * @param {Array<{ competitor: string, success: boolean, error?: string }>} competitors
+ * @param {Array<{ competitor: string, success: boolean, error?: string, network?: object }>} competitors
  */
 async function updateAdsOutput(status, competitors) {
   const payload = {
@@ -304,19 +338,101 @@ async function createPage(context) {
 }
 
 // ---------------------------------------------------------------------------
+// Network: attach the interceptor once per page
+// ---------------------------------------------------------------------------
+
+/**
+ * Attaches ./networkInterceptor to the page exactly once, before any
+ * navigation happens, so it captures GraphQL/XHR traffic from the very
+ * first request onward (including whatever traffic country selection
+ * triggers, ahead of the first competitor search). Never throws —
+ * network capture is a diagnostic aid, not a critical-path dependency,
+ * so a failure here should not abort the scraper run.
+ *
+ * @param {import('playwright').Page} page
+ * @returns {Promise<void>}
+ */
+async function attachNetworkCapture(page) {
+  try {
+    await attachNetworkInterceptor(page);
+    await Logger.info('Network interceptor attached (capturing Meta Ad Library GraphQL/XHR traffic)');
+  } catch (err) {
+    await Logger.warn(`Failed to attach network interceptor — continuing without network capture: ${err.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Network: persist whatever was captured for the current competitor
+// ---------------------------------------------------------------------------
+
+/**
+ * Reads back everything captured since the last clearCapturedResponses()
+ * call, writes the raw payloads to output/network/<competitor-slug>.json
+ * (kept separate from ads.json so raw GraphQL payloads don't bloat the
+ * main output file), and returns a lightweight summary for inclusion in
+ * ads.json. Never throws — a network-capture failure should never fail
+ * the competitor's overall result.
+ *
+ * @param {string} competitor
+ * @returns {Promise<{ responseCount: number, edgeCount: number, hasNextPage: boolean|null, rawFile: string|null }>}
+ */
+async function captureNetworkForCompetitor(competitor) {
+  const fallbackSummary = { responseCount: 0, edgeCount: 0, hasNextPage: null, rawFile: null };
+
+  try {
+    const responses = getCapturedResponses();
+
+    const edgeCount = responses.reduce((sum, r) => sum + (r.pageInfo?.edgeCount || 0), 0);
+    const lastPageInfo = responses.length > 0 ? responses[responses.length - 1].pageInfo : null;
+    const hasNextPage = lastPageInfo ? lastPageInfo.hasNextPage : null;
+
+    const rawFile = path.join(PATHS.network, `${toSlug(competitor)}.json`);
+
+    await fs.writeJson(
+      rawFile,
+      {
+        competitor,
+        capturedAt: new Date().toISOString(),
+        responseCount: responses.length,
+        responses,
+      },
+      { spaces: 2 }
+    );
+
+    await Logger.info(
+      `Persisted ${responses.length} network response(s) for "${competitor}" ` +
+        `(edges: ${edgeCount}, hasNextPage: ${hasNextPage ?? 'n/a'}) -> ${rawFile}`
+    );
+
+    return { responseCount: responses.length, edgeCount, hasNextPage, rawFile };
+  } catch (err) {
+    await Logger.warn(`Failed to persist network capture for "${competitor}": ${err.message}`);
+    return fallbackSummary;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Orchestration: process a single competitor (search + wait for ads)
 // ---------------------------------------------------------------------------
 
 /**
  * Runs the search + ad-detection workflow for a single competitor,
- * delegating all page interaction to ./metaAdLibrary. Never throws —
- * failures are captured in the returned result object.
+ * delegating all page interaction to ./metaAdLibrary. Network capture is
+ * cleared before the competitor starts and persisted after — on both the
+ * success and failure paths — since network traffic is useful for
+ * debugging a DOM-side failure even when the DOM workflow itself failed.
+ * Never throws — failures are captured in the returned result object.
  *
  * @param {import('playwright').Page} page
  * @param {string} competitor
- * @returns {Promise<{ competitor: string, success: boolean, error?: string }>}
+ * @returns {Promise<{ competitor: string, success: boolean, error?: string, network: object }>}
  */
 async function processCompetitor(page, competitor) {
+  // Reset the network buffer so this competitor's persisted capture
+  // doesn't include traffic from a previous competitor (or from the
+  // pre-loop launch/cookie/country-selection steps).
+  clearCapturedResponses();
+
   try {
     await metaAdLibrary.closePopups(page);
 
@@ -332,11 +448,27 @@ async function processCompetitor(page, competitor) {
       throw new Error('No ad cards became visible within retry window');
     }
 
+    const network = await captureNetworkForCompetitor(competitor);
+
     await Logger.info(`Successfully processed competitor: "${competitor}"`);
-    return { competitor, success: true };
+    return { competitor, success: true, network };
   } catch (err) {
+    const network = await captureNetworkForCompetitor(competitor);
+
+    // Cross-check: if the DOM workflow failed but the network layer still
+    // saw ad edges for this competitor, that's a strong signal the DOM
+    // side (waitForAds / markup) is what broke, not that Meta returned no
+    // data — worth surfacing distinctly from the generic failure log.
+    if (network.edgeCount > 0) {
+      await Logger.warn(
+        `Competitor "${competitor}" failed on the DOM side ("${err.message}") but the network layer ` +
+          `captured ${network.edgeCount} edge(s) — likely a DOM/markup mismatch rather than missing data. ` +
+          `See ${network.rawFile}`
+      );
+    }
+
     await Logger.error(`Failed to process competitor "${competitor}": ${err.message}`);
-    return { competitor, success: false, error: err.message };
+    return { competitor, success: false, error: err.message, network };
   }
 }
 
@@ -350,7 +482,7 @@ async function processCompetitor(page, competitor) {
  *
  * @param {import('playwright').Page} page
  * @param {string[]} competitors
- * @returns {Promise<Array<{ competitor: string, success: boolean, error?: string }>>}
+ * @returns {Promise<Array<{ competitor: string, success: boolean, error?: string, network?: object }>>}
  */
 async function processCompetitors(page, competitors) {
   const results = [];
@@ -397,8 +529,9 @@ async function closeBrowser(browser) {
 /**
  * Main orchestration function for the scraper module. Sets up the
  * environment, launches the browser, delegates Meta Ad Library
- * interaction to ./metaAdLibrary, processes each competitor, and ensures
- * a clean shutdown regardless of success or failure.
+ * interaction to ./metaAdLibrary, attaches network capture, processes
+ * each competitor, and ensures a clean shutdown regardless of success or
+ * failure.
  */
 async function main() {
   let browser;
@@ -412,6 +545,11 @@ async function main() {
     browser = await launchBrowser();
     const context = await createBrowserContext(browser);
     const page = await createPage(context);
+
+    // Attach network capture before any navigation, so it's in place for
+    // whatever traffic country selection triggers ahead of the first
+    // competitor search.
+    await attachNetworkCapture(page);
 
     // --- Meta Ad Library interaction is fully delegated ---
     await metaAdLibrary.launch(page);
@@ -447,6 +585,8 @@ module.exports = {
   launchBrowser,
   createBrowserContext,
   createPage,
+  attachNetworkCapture,
+  captureNetworkForCompetitor,
   processCompetitor,
   processCompetitors,
   closeBrowser,
