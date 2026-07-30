@@ -14,17 +14,21 @@
  * - Delegate ALL Meta Ad Library interaction to ./metaAdLibrary
  * - Attach ./networkInterceptor once per page to passively capture Meta
  *   Ad Library GraphQL/XHR traffic alongside the DOM-driven workflow
- * - Loop through competitors, search each brand, wait for ads, log results
+ * - Delegate DOM ad extraction to ./parser
+ * - Extract and normalize GraphQL ad objects from captured network traffic
+ * - Merge DOM-extracted ads with GraphQL-extracted ads via ./dataMerger
+ * - Loop through competitors, search each brand, wait for ads, scroll
+ *   until the feed stabilizes, extract + merge, log results
  * - Persist captured network traffic per competitor for pagination/edge
  *   counts and DOM-failure debugging
  * - Cleanly shut down the browser
  *
- * This module intentionally contains NO Meta Ad Library navigation logic.
- * All page-level interaction (launch, cookies, country selection, search,
- * waiting for ads, popups) lives in ./metaAdLibrary and is only invoked
- * here. Network capture is similarly delegated to ./networkInterceptor —
- * this module only attaches it, clears it per competitor, and persists
- * whatever it captured.
+ * This module intentionally contains NO Meta Ad Library navigation logic
+ * and NO DOM parsing logic. All page-level interaction (launch, cookies,
+ * country selection, search, waiting for ads, scrolling, popups) lives in
+ * ./metaAdLibrary; all DOM extraction lives in ./parser; all GraphQL/XHR
+ * capture lives in ./networkInterceptor; all dataset merging lives in
+ * ./dataMerger. This module only wires them together.
  *
  * Usage:
  * node src/scraper.js
@@ -37,6 +41,8 @@ const fs = require('fs-extra');
 const { chromium } = require('playwright');
 
 const metaAdLibrary = require('./metaAdLibrary');
+const parser = require('./parser');
+const dataMerger = require('./dataMerger');
 const {
   attachNetworkInterceptor,
   getCapturedResponses,
@@ -191,12 +197,12 @@ async function initializeAdsOutput() {
 
 /**
  * Overwrites output/ads.json with the current run status and the
- * accumulated per-competitor results (search/ad-detection status, plus a
- * lightweight network-capture summary — raw GraphQL payloads themselves
- * live under output/network/, not inline in ads.json).
+ * accumulated per-competitor results (search/ad-detection status, merged
+ * ad data, plus a lightweight network-capture summary — raw GraphQL
+ * payloads themselves live under output/network/, not inline in ads.json).
  *
  * @param {'initialized'|'running'|'completed'|'failed'} status
- * @param {Array<{ competitor: string, success: boolean, error?: string, network?: object }>} competitors
+ * @param {Array<{ competitor: string, success: boolean, ads?: object[], error?: string, network?: object }>} competitors
  */
 async function updateAdsOutput(status, competitors) {
   const payload = {
@@ -412,20 +418,306 @@ async function captureNetworkForCompetitor(competitor) {
 }
 
 // ---------------------------------------------------------------------------
-// Orchestration: process a single competitor (search + wait for ads)
+// GraphQL extraction: recursively walk captured network payloads and
+// normalize any Meta-Ad-shaped object found within them
 // ---------------------------------------------------------------------------
 
 /**
- * Runs the search + ad-detection workflow for a single competitor,
- * delegating all page interaction to ./metaAdLibrary. Network capture is
- * cleared before the competitor starts and persisted after — on both the
- * success and failure paths — since network traffic is useful for
- * debugging a DOM-side failure even when the DOM workflow itself failed.
- * Never throws — failures are captured in the returned result object.
+ * Heuristically identifies whether a plain object "looks like" a Meta ad
+ * object, based on the presence of any of the known identifying fields.
+ * Meta's GraphQL response shapes vary across endpoints/versions, so this
+ * is intentionally permissive — false positives are filtered out later
+ * by normalizeGraphQLAd() returning null for objects that don't yield
+ * any usable fields. Never throws.
+ *
+ * @param {*} node
+ * @returns {boolean}
+ */
+function looksLikeAdObject(node) {
+  try {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) return false;
+
+    return (
+      node.libraryId !== undefined ||
+      node.ad_archive_id !== undefined ||
+      node.adId !== undefined ||
+      node.ad_archive !== undefined ||
+      node.snapshot !== undefined ||
+      node.creative !== undefined
+    );
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Pulls a best-effort list of media URLs out of a variety of shapes Meta
+ * may use to represent images/videos (array of strings, array of objects
+ * with url/src/original_image_url, or a single string). Never throws.
+ *
+ * @param {*} source
+ * @returns {string[]}
+ */
+function collectMediaUrls(source) {
+  try {
+    if (!source) return [];
+
+    if (typeof source === 'string') return [source];
+
+    if (Array.isArray(source)) {
+      return source
+        .map((item) => {
+          if (typeof item === 'string') return item;
+          return item?.url ?? item?.src ?? item?.original_image_url ?? item?.original_video_url ?? null;
+        })
+        .filter(Boolean);
+    }
+
+    return [];
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
+ * Resolves an Active/Inactive status string from whichever field the
+ * payload happens to expose. Never throws.
+ *
+ * @param {*} raw
+ * @returns {string|null}
+ */
+function resolveGraphQLStatus(raw) {
+  try {
+    if (typeof raw?.status === 'string') return raw.status;
+
+    if (typeof raw?.ad_archive?.is_active === 'boolean') {
+      return raw.ad_archive.is_active ? 'Active' : 'Inactive';
+    }
+
+    if (typeof raw?.isActive === 'boolean') {
+      return raw.isActive ? 'Active' : 'Inactive';
+    }
+
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Normalizes a raw candidate object (identified by looksLikeAdObject)
+ * into the fixed GraphQL ad shape. Uses optional chaining throughout so
+ * a missing/differently-shaped nested field never throws — it just
+ * resolves to null. Malformed candidates that yield nothing usable
+ * return null so the caller can skip them.
+ *
+ * @param {*} raw
+ * @returns {{
+ *   libraryId: string|null,
+ *   adId: string|null,
+ *   advertiser: string|null,
+ *   headline: string|null,
+ *   primaryText: string|null,
+ *   status: string|null,
+ *   startDate: string|null,
+ *   endDate: string|null,
+ *   destinationUrl: string|null,
+ *   images: string[],
+ *   videos: string[],
+ *   countries: string[]|null
+ * }|null}
+ */
+function normalizeGraphQLAd(raw) {
+  try {
+    if (!raw || typeof raw !== 'object') return null;
+
+    const snapshot = raw?.snapshot ?? raw?.ad_archive?.snapshot ?? null;
+    const creative = raw?.creative ?? snapshot?.creative ?? null;
+
+    const libraryIdRaw =
+      raw?.libraryId ?? raw?.ad_archive_id ?? raw?.ad_archive?.ad_archive_id ?? raw?.adArchiveID ?? null;
+
+    const adIdRaw = raw?.adId ?? raw?.ad_id ?? raw?.id ?? null;
+
+    const advertiser =
+      raw?.advertiser ??
+      snapshot?.page_name ??
+      raw?.page_name ??
+      raw?.pageName ??
+      creative?.advertiser_name ??
+      null;
+
+    const headline = snapshot?.title ?? creative?.title ?? raw?.headline ?? raw?.title ?? null;
+
+    const primaryText =
+      snapshot?.body?.text ??
+      (typeof snapshot?.body === 'string' ? snapshot.body : null) ??
+      creative?.body ??
+      raw?.body ??
+      raw?.primaryText ??
+      null;
+
+    const startDate = raw?.startDate ?? raw?.ad_archive?.start_date ?? raw?.start_date_string ?? null;
+
+    const endDate = raw?.endDate ?? raw?.ad_archive?.end_date ?? raw?.end_date_string ?? null;
+
+    const destinationUrl =
+      snapshot?.link_url ?? creative?.link_url ?? raw?.destinationUrl ?? raw?.link_url ?? null;
+
+    const images = collectMediaUrls(snapshot?.images ?? creative?.images ?? raw?.images);
+    const videos = collectMediaUrls(snapshot?.videos ?? creative?.videos ?? raw?.videos);
+
+    const countries = Array.isArray(raw?.countries)
+      ? raw.countries
+      : Array.isArray(raw?.ad_archive?.countries)
+      ? raw.ad_archive.countries
+      : null;
+
+    const normalized = {
+      libraryId: libraryIdRaw !== null && libraryIdRaw !== undefined ? String(libraryIdRaw) : null,
+      adId: adIdRaw !== null && adIdRaw !== undefined ? String(adIdRaw) : null,
+      advertiser: typeof advertiser === 'string' ? advertiser : null,
+      headline: typeof headline === 'string' ? headline : null,
+      primaryText: typeof primaryText === 'string' ? primaryText : null,
+      status: resolveGraphQLStatus(raw),
+      startDate: typeof startDate === 'string' ? startDate : null,
+      endDate: typeof endDate === 'string' ? endDate : null,
+      destinationUrl: typeof destinationUrl === 'string' ? destinationUrl : null,
+      images,
+      videos,
+      countries,
+    };
+
+    // Skip candidates that matched looksLikeAdObject() but yielded
+    // nothing usable at all (e.g. a false-positive structural match).
+    const hasAnySignal =
+      normalized.libraryId ||
+      normalized.adId ||
+      normalized.advertiser ||
+      normalized.headline ||
+      normalized.primaryText ||
+      normalized.destinationUrl ||
+      normalized.images.length > 0 ||
+      normalized.videos.length > 0;
+
+    return hasAnySignal ? normalized : null;
+  } catch (e) {
+    // Malformed object — skip rather than throw.
+    return null;
+  }
+}
+
+/**
+ * extractGraphQLAds(responses)
+ * ---------------------------------------------------------------------------
+ * Pure JavaScript, no Playwright code. Recursively walks every captured
+ * network response payload, collects every object that looks like a Meta
+ * ad (per looksLikeAdObject), normalizes each into the fixed GraphQL ad
+ * shape, deduplicates by libraryId, and returns the resulting array.
+ *
+ * Never throws: malformed responses, malformed nested objects, and
+ * candidates that don't normalize into anything usable are all silently
+ * skipped rather than aborting the whole extraction.
+ *
+ * @param {Array<object>} responses - raw captured responses from getCapturedResponses()
+ * @returns {Array<object>} normalized, deduplicated GraphQL ads
+ */
+function extractGraphQLAds(responses) {
+  if (!Array.isArray(responses) || responses.length === 0) return [];
+
+  const MAX_WALK_DEPTH = 12;
+  const collected = [];
+
+  function walk(node, depth) {
+    if (depth > MAX_WALK_DEPTH || node === null || node === undefined) return;
+
+    try {
+      if (Array.isArray(node)) {
+        for (const item of node) {
+          walk(item, depth + 1);
+        }
+        return;
+      }
+
+      if (typeof node !== 'object') return;
+
+      if (looksLikeAdObject(node)) {
+        collected.push(node);
+      }
+
+      for (const key of Object.keys(node)) {
+        walk(node[key], depth + 1);
+      }
+    } catch (e) {
+      // Malformed/unwalkable node — skip it and continue with siblings.
+    }
+  }
+
+  for (const response of responses) {
+    try {
+      walk(response, 0);
+    } catch (e) {
+      // Malformed response — skip entirely, continue with the rest.
+    }
+  }
+
+  const normalized = collected.map((raw) => normalizeGraphQLAd(raw)).filter(Boolean);
+
+  // Deduplicate by libraryId (first occurrence wins). Ads without a
+  // libraryId are all kept, since there's no reliable key to dedup them
+  // by at this layer.
+  const seenLibraryIds = new Set();
+  const deduped = [];
+
+  for (const ad of normalized) {
+    if (!ad.libraryId) {
+      deduped.push(ad);
+      continue;
+    }
+
+    if (!seenLibraryIds.has(ad.libraryId)) {
+      seenLibraryIds.add(ad.libraryId);
+      deduped.push(ad);
+    }
+  }
+
+  return deduped;
+}
+
+// ---------------------------------------------------------------------------
+// Orchestration: process a single competitor
+// (search -> wait for ads -> scroll until stable -> DOM extract ->
+//  network capture -> GraphQL extract -> merge)
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs the full per-competitor workflow: search, wait for ads, scroll
+ * until the feed stabilizes (delegated to ./metaAdLibrary), extract DOM
+ * ads (delegated to ./parser), persist + summarize captured network
+ * traffic, extract and normalize GraphQL ads from that traffic, and
+ * merge both datasets (delegated to ./dataMerger).
+ *
+ * Network capture is cleared before the competitor starts and persisted
+ * after — on both the success and failure paths — since network traffic
+ * is useful for debugging a DOM-side failure even when the DOM workflow
+ * itself failed. Never throws — failures are captured in the returned
+ * result object.
+ *
+ * Backward compatible by construction: if no GraphQL ads are found in
+ * the captured traffic, extractGraphQLAds() simply returns [], and
+ * dataMerger.mergeAds(domAds, []) is called as usual — the scraper never
+ * fails just because GraphQL data wasn't available.
  *
  * @param {import('playwright').Page} page
  * @param {string} competitor
- * @returns {Promise<{ competitor: string, success: boolean, error?: string, network: object }>}
+ * @returns {Promise<{
+ *   competitor: string,
+ *   success: boolean,
+ *   ads: object[],
+ *   stats: object,
+ *   network: object,
+ *   error?: string
+ * }>}
  */
 async function processCompetitor(page, competitor) {
   // Reset the network buffer so this competitor's persisted capture
@@ -448,10 +740,50 @@ async function processCompetitor(page, competitor) {
       throw new Error('No ad cards became visible within retry window');
     }
 
+    // Load the FULL result set before parsing — Meta virtualizes the
+    // feed and only renders a viewport's worth of cards at a time.
+    await metaAdLibrary.scrollUntilStable(page);
+
+    // --- DOM extraction (delegated to ./parser — unchanged) ---
+    const extraction = await parser.extractAds(page, competitor);
+
+    // --- Network capture: persist + summarize what was captured ---
     const network = await captureNetworkForCompetitor(competitor);
 
-    await Logger.info(`Successfully processed competitor: "${competitor}"`);
-    return { competitor, success: true, network };
+    // --- GraphQL extraction: normalize ad objects out of the raw
+    // captured responses (pure JS, no Playwright/DOM involved) ---
+    const rawResponses = getCapturedResponses();
+    const graphqlAds = extractGraphQLAds(rawResponses);
+
+    await Logger.info(
+      `Extracted ${graphqlAds.length} GraphQL ad(s) for "${competitor}" from ${rawResponses.length} captured response(s)`
+    );
+
+    // --- Merge DOM ads + GraphQL ads (delegated to ./dataMerger) ---
+    // If graphqlAds is empty, this is equivalent to
+    // dataMerger.mergeAds(extraction.ads, []) — the scraper continues to
+    // work exactly as before using DOM ads only.
+    const merged = dataMerger.mergeAds(extraction.ads, graphqlAds);
+
+    await Logger.info(
+      `Successfully processed competitor: "${competitor}" - ${merged.ads.length} merged ad(s)`
+    );
+
+    return {
+      competitor,
+      success: true,
+      ads: merged.ads,
+      stats: {
+        ...extraction.stats,
+        ...merged.stats,
+        network: {
+          responseCount: network.responseCount,
+          edgeCount: network.edgeCount,
+          hasNextPage: network.hasNextPage,
+        },
+      },
+      network,
+    };
   } catch (err) {
     const network = await captureNetworkForCompetitor(competitor);
 
@@ -468,7 +800,7 @@ async function processCompetitor(page, competitor) {
     }
 
     await Logger.error(`Failed to process competitor "${competitor}": ${err.message}`);
-    return { competitor, success: false, error: err.message, network };
+    return { competitor, success: false, ads: [], error: err.message, network };
   }
 }
 
@@ -482,7 +814,7 @@ async function processCompetitor(page, competitor) {
  *
  * @param {import('playwright').Page} page
  * @param {string[]} competitors
- * @returns {Promise<Array<{ competitor: string, success: boolean, error?: string, network?: object }>>}
+ * @returns {Promise<Array<{ competitor: string, success: boolean, ads: object[], stats?: object, error?: string, network?: object }>>}
  */
 async function processCompetitors(page, competitors) {
   const results = [];
@@ -587,6 +919,7 @@ module.exports = {
   createPage,
   attachNetworkCapture,
   captureNetworkForCompetitor,
+  extractGraphQLAds,
   processCompetitor,
   processCompetitors,
   closeBrowser,
