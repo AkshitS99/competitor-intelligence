@@ -40,7 +40,7 @@ const TIMEOUTS = {
 
   short: 5000,
 
-  stability: 2000,
+  stability: 3000,
 
 };
 
@@ -99,7 +99,6 @@ async function sleep(ms) {
 
 async function withRetry(fn, options = {}) {
 
-
   const {
 
     maxAttempts = RETRY.maxAttempts,
@@ -124,6 +123,7 @@ async function withRetry(fn, options = {}) {
     try {
 
       return await fn();
+
 
     } catch(err) {
 
@@ -246,15 +246,11 @@ async function launch(page) {
 
 
 
-    const html = await page.content();
-
-
-
     await fs.promises.writeFile(
 
-      'logs/meta-home.html',
+      'logs/html/meta-home.html',
 
-      html,
+      await page.content(),
 
       'utf8'
 
@@ -319,32 +315,53 @@ async function acceptCookies(page) {
   try {
 
 
-    for (const text of candidateTexts) {
+    for(const text of candidateTexts){
+
 
 
       const button =
+
         page
-          .getByRole('button', {name:text})
+
+          .getByRole(
+
+            'button',
+
+            {
+              name:text
+            }
+
+          )
+
           .first();
 
 
 
       const visible =
+
         await button
+
           .isVisible({
+
             timeout:TIMEOUTS.short
+
           })
+
           .catch(()=>false);
 
 
 
-      if(visible) {
+      if(visible){
 
 
         await button
+
           .click({
+
             timeout:TIMEOUTS.short
+
           })
+
           .catch(()=>{});
 
 
@@ -384,17 +401,13 @@ async function acceptCookies(page) {
 
       'WARN',
 
-      `acceptCookies encountered a non-fatal issue: ${err.message}`
+      `acceptCookies encountered issue: ${err.message}`
 
     );
 
   }
 
 }
-
-
-
-
 // ---------------------------------------------------------------------------
 // 3. selectCountry(page, country)
 // ---------------------------------------------------------------------------
@@ -455,7 +468,7 @@ async function selectCountry(page, country) {
 
 
 
-    if(!visible) {
+    if(!visible){
 
 
       log(
@@ -475,6 +488,7 @@ async function selectCountry(page, country) {
 
 
     await countryControl.click().catch(()=>{});
+
 
 
 
@@ -499,7 +513,14 @@ async function selectCountry(page, country) {
 
     ){
 
-      await searchInput.fill(country).catch(()=>{});
+
+      await searchInput
+
+        .fill(country)
+
+        .catch(()=>{});
+
+
 
       await page.waitForTimeout(500);
 
@@ -533,7 +554,9 @@ async function selectCountry(page, country) {
 
     ){
 
+
       await option.click().catch(()=>{});
+
 
 
       log(
@@ -543,6 +566,7 @@ async function selectCountry(page, country) {
         `Selected country: ${country}`
 
       );
+
 
     }
 
@@ -559,9 +583,13 @@ async function selectCountry(page, country) {
 
     );
 
+
   }
 
 }
+
+
+
 
 // ---------------------------------------------------------------------------
 // 4. searchBrand(page, brand)
@@ -572,7 +600,7 @@ async function searchBrand(page, brand) {
 
   return withRetry(
 
-    async () => {
+    async()=>{
 
 
       log(
@@ -585,7 +613,11 @@ async function searchBrand(page, brand) {
 
 
 
+
       const searchSelectors = [
+
+
+        // Meta current search patterns
 
         'input[aria-label*="Search"]',
 
@@ -605,7 +637,9 @@ async function searchBrand(page, brand) {
 
 
 
+
       let searchInput = null;
+
 
 
 
@@ -657,6 +691,7 @@ async function searchBrand(page, brand) {
             );
 
 
+
             break;
 
           }
@@ -695,15 +730,11 @@ async function searchBrand(page, brand) {
 
 
 
-        const html = await page.content();
-
-
-
         await fs.promises.writeFile(
 
           `logs/html/search-input-not-found-${timestamp}.html`,
 
-          html,
+          await page.content(),
 
           'utf8'
 
@@ -723,11 +754,14 @@ async function searchBrand(page, brand) {
 
 
 
+
       await searchInput.click({
 
         timeout:TIMEOUTS.short
 
       });
+
+
 
 
 
@@ -761,6 +795,7 @@ async function searchBrand(page, brand) {
 
 
 
+
       await page.keyboard.press('Enter');
 
 
@@ -777,7 +812,23 @@ async function searchBrand(page, brand) {
 
 
 
+      // Allow results page to render
+
       await page.waitForTimeout(8000);
+
+
+
+
+      await page.screenshot({
+
+        path:
+
+          `logs/screenshots/search-results-${Date.now()}.png`,
+
+        fullPage:true
+
+      }).catch(()=>{});
+
 
 
 
@@ -788,6 +839,7 @@ async function searchBrand(page, brand) {
     },
 
     {
+
 
       label:`searchBrand("${brand}")`,
 
@@ -802,15 +854,11 @@ async function searchBrand(page, brand) {
   );
 
 }
-
-
-
-
 // ---------------------------------------------------------------------------
 // 5. waitForAds(page)
 // ---------------------------------------------------------------------------
 
-async function waitForAds(page){
+async function waitForAds(page) {
 
 
   return withRetry(
@@ -818,41 +866,168 @@ async function waitForAds(page){
     async()=>{
 
 
-      const adCard =
-
-        page
-
-          .locator('div[role="article"]')
-
-          .or(
-
-            page.getByText(/Library ID/i)
-
-          )
-
-          .first();
-
-
-
-
-      await adCard.waitFor({
-
-        state:'visible',
-
-        timeout:TIMEOUTS.selector
-
-      });
-
-
-
-
       log(
 
         'INFO',
 
-        'Ad cards detected on the page.'
+        'Waiting for Meta ad results...'
 
       );
+
+
+
+
+      const adSelectors = [
+
+
+        // Meta Ad Library containers
+
+        '[data-pagelet*="AdLibrary"]',
+
+        '[data-testid*="ad"]',
+
+        '[data-testid*="Ad"]',
+
+        'div[role="article"]',
+
+        'div[aria-label*="Ad"]',
+
+        'a[href*="/ads/library/"]',
+
+
+
+        // Text indicators
+
+        'text=/Library ID/i',
+
+        'text=/Sponsored/i',
+
+        'text=/Active ads/i',
+
+        'text=/Ads from/i'
+
+      ];
+
+
+
+
+      let adFound = false;
+
+
+
+
+      for(const selector of adSelectors){
+
+
+        try{
+
+
+          const locator =
+
+            page
+
+              .locator(selector)
+
+              .first();
+
+
+
+
+          const visible =
+
+            await locator
+
+              .isVisible({
+
+                timeout:3000
+
+              })
+
+              .catch(()=>false);
+
+
+
+
+          if(visible){
+
+
+
+            log(
+
+              'INFO',
+
+              `Ad results detected using selector: ${selector}`
+
+            );
+
+
+
+            adFound = true;
+
+
+            break;
+
+          }
+
+
+
+        }catch{
+
+
+          continue;
+
+        }
+
+      }
+
+
+
+
+      if(!adFound){
+
+
+
+        const timestamp = Date.now();
+
+
+
+
+        await page.screenshot({
+
+          path:
+
+            `logs/screenshots/no-ad-results-${timestamp}.png`,
+
+          fullPage:true
+
+        }).catch(()=>{});
+
+
+
+
+
+        await fs.promises.writeFile(
+
+          `logs/html/no-ad-results-${timestamp}.html`,
+
+          await page.content(),
+
+          'utf8'
+
+        ).catch(()=>{});
+
+
+
+
+
+        throw new Error(
+
+          'No Meta ad result cards detected'
+
+        );
+
+      }
+
 
 
 
@@ -863,6 +1038,7 @@ async function waitForAds(page){
     },
 
     {
+
 
       label:'waitForAds',
 
@@ -877,6 +1053,7 @@ async function waitForAds(page){
   );
 
 }
+
 
 
 
@@ -920,7 +1097,15 @@ async function closePopups(page){
 
         page
 
-          .getByRole('button',{name:text})
+          .getByRole(
+
+            'button',
+
+            {
+              name:text
+            }
+
+          )
 
           .or(
 
@@ -929,6 +1114,7 @@ async function closePopups(page){
           )
 
           .first();
+
 
 
 
@@ -948,7 +1134,9 @@ async function closePopups(page){
 
 
 
+
       if(visible){
+
 
 
         await button
@@ -963,6 +1151,8 @@ async function closePopups(page){
 
 
 
+
+
         log(
 
           'INFO',
@@ -971,9 +1161,12 @@ async function closePopups(page){
 
         );
 
+
       }
 
+
     }
+
 
 
 
@@ -982,7 +1175,10 @@ async function closePopups(page){
 
 
 
+
+
   }catch(err){
+
 
 
     log(
@@ -993,9 +1189,11 @@ async function closePopups(page){
 
     );
 
+
   }
 
 }
+
 
 
 
@@ -1005,6 +1203,7 @@ async function closePopups(page){
 // ---------------------------------------------------------------------------
 
 module.exports = {
+
 
   launch,
 
@@ -1017,5 +1216,6 @@ module.exports = {
   waitForAds,
 
   closePopups,
+
 
 };
