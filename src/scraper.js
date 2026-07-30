@@ -3,20 +3,21 @@
  *
  * Enterprise Competitor Intelligence Platform
  * ---------------------------------------------------------------------------
- * Phase 1 Scraper Module
+ * Orchestration Module
  *
- * Responsibilities in this phase:
+ * Responsibilities:
  *   - Bootstrap required project directories (output, logs, assets, reports)
- *   - Initialize output/ads.json as a placeholder result file
- *   - Read the competitor list from config/competitors.json
+ *   - Initialize/update output/ads.json with run status
+ *   - Read competitor list (and target country) from config/competitors.json
  *   - Launch a realistic desktop Chromium browser via Playwright
- *   - Open the Meta Ad Library and search for each competitor
- *   - Wait for search results to render and log progress
+ *   - Delegate ALL Meta Ad Library interaction to ./metaAdLibrary
+ *   - Loop through competitors, search each brand, wait for ads, log results
  *   - Cleanly shut down the browser
  *
- * NOTE: Advertisement data extraction is intentionally NOT implemented in
- * this phase, per requirements. This module only verifies that navigation
- * and search flows work correctly for each competitor.
+ * This module intentionally contains NO Meta Ad Library navigation logic.
+ * All page-level interaction (launch, cookies, country selection, search,
+ * waiting for ads, popups) lives in ./metaAdLibrary and is only invoked
+ * here.
  *
  * Usage:
  *   node src/scraper.js
@@ -27,6 +28,8 @@
 const path = require('path');
 const fs = require('fs-extra');
 const { chromium } = require('playwright');
+
+const metaAdLibrary = require('./metaAdLibrary');
 
 // ---------------------------------------------------------------------------
 // Constants & Paths
@@ -44,17 +47,11 @@ const PATHS = {
   logFile: path.join(ROOT_DIR, 'logs', 'scraper.log'),
 };
 
-const AD_LIBRARY_BASE_URL = 'https://www.facebook.com/ads/library/';
+const DEFAULT_COUNTRY = 'India';
 
 const REALISTIC_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-
-const TIMEOUTS = {
-  navigation: 45000,
-  selector: 20000,
-  postSearchWaitMs: 3000,
-};
 
 // ---------------------------------------------------------------------------
 // Logger
@@ -156,17 +153,46 @@ async function initializeAdsOutput() {
 }
 
 // ---------------------------------------------------------------------------
-// Config: load competitor list
+// Output: update ads.json with the latest run status and per-competitor results
 // ---------------------------------------------------------------------------
 
 /**
- * Loads and validates the competitor list from config/competitors.json.
- * Supports either a flat array of strings or an object with a
- * `competitors` array of strings/objects.
+ * Overwrites output/ads.json with the current run status and the
+ * accumulated per-competitor results (search/ad-detection status only —
+ * no ad content, since extraction is out of scope for this module).
  *
- * @returns {Promise<string[]>} list of competitor names
+ * @param {'initialized'|'running'|'completed'|'failed'} status
+ * @param {Array<{ competitor: string, success: boolean, error?: string }>} competitors
  */
-async function loadCompetitors() {
+async function updateAdsOutput(status, competitors) {
+  const payload = {
+    timestamp: new Date().toISOString(),
+    status,
+    competitors,
+  };
+
+  try {
+    await fs.writeJson(PATHS.adsJson, payload, { spaces: 2 });
+    await Logger.info(`Updated output/ads.json with status "${status}"`);
+  } catch (err) {
+    await Logger.error(`Failed to update output/ads.json: ${err.message}`);
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Config: load competitor list (and target country) from competitors.json
+// ---------------------------------------------------------------------------
+
+/**
+ * Loads and validates competitor configuration from config/competitors.json.
+ * Supports:
+ *   - a flat array of strings: ["Brand A", "Brand B"]
+ *   - an object: { country: "India", competitors: ["Brand A", "Brand B"] }
+ *
+ * @returns {Promise<{ country: string, competitors: string[] }>}
+ */
+async function loadCompetitorConfig() {
   try {
     const exists = await fs.pathExists(PATHS.config);
     if (!exists) {
@@ -175,6 +201,7 @@ async function loadCompetitors() {
 
     const data = await fs.readJson(PATHS.config);
     const rawList = Array.isArray(data) ? data : data.competitors;
+    const country = (!Array.isArray(data) && data.country) || DEFAULT_COUNTRY;
 
     if (!Array.isArray(rawList) || rawList.length === 0) {
       throw new Error('competitors.json must contain a non-empty array of competitor names');
@@ -188,10 +215,13 @@ async function loadCompetitors() {
       throw new Error('No valid competitor names could be parsed from competitors.json');
     }
 
-    await Logger.info(`Loaded ${competitors.length} competitor(s) from config/competitors.json`);
-    return competitors;
+    await Logger.info(
+      `Loaded ${competitors.length} competitor(s) from config/competitors.json (country: "${country}")`
+    );
+
+    return { country, competitors };
   } catch (err) {
-    await Logger.error(`Failed to load competitors: ${err.message}`);
+    await Logger.error(`Failed to load competitor config: ${err.message}`);
     throw err;
   }
 }
@@ -243,9 +273,6 @@ async function createBrowserContext(browser) {
       timezoneId: 'Asia/Kolkata',
     });
 
-    context.setDefaultNavigationTimeout(TIMEOUTS.navigation);
-    context.setDefaultTimeout(TIMEOUTS.selector);
-
     await Logger.info('Created browser context with realistic desktop fingerprint');
     return context;
   } catch (err) {
@@ -277,77 +304,39 @@ async function createPage(context) {
 }
 
 // ---------------------------------------------------------------------------
-// Navigation: build the Meta Ad Library search URL for a competitor
+// Orchestration: process a single competitor (search + wait for ads)
 // ---------------------------------------------------------------------------
 
 /**
- * Builds a Meta Ad Library search URL for the given competitor name.
- *
- * @param {string} competitorName
- * @returns {string}
- */
-function buildSearchUrl(competitorName) {
-  const params = new URLSearchParams({
-    active_status: 'active',
-    ad_type: 'all',
-    country: 'ALL',
-    q: competitorName,
-    media_type: 'all',
-  });
-
-  return `${AD_LIBRARY_BASE_URL}?${params.toString()}`;
-}
-
-// ---------------------------------------------------------------------------
-// Navigation: open Meta Ad Library and search for a competitor
-// ---------------------------------------------------------------------------
-
-/**
- * Navigates the given page to the Meta Ad Library search results for a
- * specific competitor and waits for the results region to render.
- *
- * Does NOT extract any ad data — this phase only validates that the
- * search flow completes successfully.
+ * Runs the search + ad-detection workflow for a single competitor,
+ * delegating all page interaction to ./metaAdLibrary. Never throws —
+ * failures are captured in the returned result object.
  *
  * @param {import('playwright').Page} page
- * @param {string} competitorName
+ * @param {string} competitor
+ * @returns {Promise<{ competitor: string, success: boolean, error?: string }>}
  */
-async function searchCompetitor(page, competitorName) {
-  const url = buildSearchUrl(competitorName);
-
-  await Logger.info(`Navigating to Meta Ad Library for competitor: "${competitorName}"`);
-
-  await page.goto(url, {
-    waitUntil: 'domcontentloaded',
-    timeout: TIMEOUTS.navigation,
-  });
-
-  await waitForResults(page, competitorName);
-
-  await Logger.info(`Search completed for competitor: "${competitorName}"`);
-}
-
-// ---------------------------------------------------------------------------
-// Navigation: wait for search results to render
-// ---------------------------------------------------------------------------
-
-/**
- * Waits for the Ad Library results region to appear on the page. Falls
- * back gracefully with a warning if the expected selector does not show
- * up in time, without throwing (since the platform may still be usable).
- *
- * @param {import('playwright').Page} page
- * @param {string} competitorName
- */
-async function waitForResults(page, competitorName) {
+async function processCompetitor(page, competitor) {
   try {
-    await page.waitForSelector('[role="main"]', { timeout: TIMEOUTS.selector });
-    await page.waitForTimeout(TIMEOUTS.postSearchWaitMs);
-    await Logger.info(`Results region detected for competitor: "${competitorName}"`);
+    await metaAdLibrary.closePopups(page);
+
+    const searchSucceeded = await metaAdLibrary.searchBrand(page, competitor);
+    if (!searchSucceeded) {
+      throw new Error('Search submission failed or results did not load');
+    }
+
+    await metaAdLibrary.closePopups(page);
+
+    const adsFound = await metaAdLibrary.waitForAds(page);
+    if (!adsFound) {
+      throw new Error('No ad cards became visible within retry window');
+    }
+
+    await Logger.info(`Successfully processed competitor: "${competitor}"`);
+    return { competitor, success: true };
   } catch (err) {
-    await Logger.warn(
-      `Results region did not appear in time for "${competitorName}": ${err.message}`
-    );
+    await Logger.error(`Failed to process competitor "${competitor}": ${err.message}`);
+    return { competitor, success: false, error: err.message };
   }
 }
 
@@ -356,21 +345,26 @@ async function waitForResults(page, competitorName) {
 // ---------------------------------------------------------------------------
 
 /**
- * Iterates over the competitor list, performing a search for each one on
- * the shared page. Errors for an individual competitor are logged and
- * do not halt processing of the remaining competitors.
+ * Iterates over the competitor list, processing each one sequentially on
+ * the shared page. Accumulates and returns per-competitor results.
  *
  * @param {import('playwright').Page} page
  * @param {string[]} competitors
+ * @returns {Promise<Array<{ competitor: string, success: boolean, error?: string }>>}
  */
 async function processCompetitors(page, competitors) {
+  const results = [];
+
   for (const competitor of competitors) {
-    try {
-      await searchCompetitor(page, competitor);
-    } catch (err) {
-      await Logger.error(`Failed to process competitor "${competitor}": ${err.message}`);
-    }
+    const result = await processCompetitor(page, competitor);
+    results.push(result);
+
+    // Persist progress incrementally so partial results are never lost
+    // if a later competitor causes an unexpected failure.
+    await updateAdsOutput('running', results);
   }
+
+  return results;
 }
 
 // ---------------------------------------------------------------------------
@@ -402,8 +396,9 @@ async function closeBrowser(browser) {
 
 /**
  * Main orchestration function for the scraper module. Sets up the
- * environment, launches the browser, processes each competitor's search
- * flow, and ensures a clean shutdown regardless of success or failure.
+ * environment, launches the browser, delegates Meta Ad Library
+ * interaction to ./metaAdLibrary, processes each competitor, and ensures
+ * a clean shutdown regardless of success or failure.
  */
 async function main() {
   let browser;
@@ -412,17 +407,26 @@ async function main() {
     await ensureDirectories();
     await initializeAdsOutput();
 
-    const competitors = await loadCompetitors();
+    const { country, competitors } = await loadCompetitorConfig();
 
     browser = await launchBrowser();
     const context = await createBrowserContext(browser);
     const page = await createPage(context);
 
-    await processCompetitors(page, competitors);
+    // --- Meta Ad Library interaction is fully delegated ---
+    await metaAdLibrary.launch(page);
+    await metaAdLibrary.acceptCookies(page);
+    await metaAdLibrary.selectCountry(page, country);
 
-    await Logger.info('Scraper phase 1 (search validation) completed successfully');
+    const results = await processCompetitors(page, competitors);
+
+    const overallStatus = results.every((r) => r.success) ? 'completed' : 'completed_with_errors';
+    await updateAdsOutput(overallStatus, results);
+
+    await Logger.info(`Scraper run finished with status: "${overallStatus}"`);
   } catch (err) {
     await Logger.error(`Fatal error during scraper execution: ${err.message}`);
+    await updateAdsOutput('failed', []).catch(() => {});
     process.exitCode = 1;
   } finally {
     await closeBrowser(browser);
@@ -438,13 +442,12 @@ if (require.main === module) {
 module.exports = {
   ensureDirectories,
   initializeAdsOutput,
-  loadCompetitors,
+  updateAdsOutput,
+  loadCompetitorConfig,
   launchBrowser,
   createBrowserContext,
   createPage,
-  buildSearchUrl,
-  searchCompetitor,
-  waitForResults,
+  processCompetitor,
   processCompetitors,
   closeBrowser,
   main,
