@@ -1,23 +1,16 @@
-[
-  "AIS Windows",
-  "Fenesta",
-  "Aparna Venster",
-  "Koemmerling India",
-  "LG Hausys Windows",
-  "Prominance",
-  "Encraft India",
-  "Weatherseal Windows",
-  "Tostem India",
-  "Ozone Overseas",
-  "AluPure",
-  "Geeta Aluminium",
-  "Lingel Windows & Doors",
-  "NCL Wintech",
-  "Deceuninck India",
-  "VEKA India",
-  "Eternia by Hindalco",
-  "Saint-Gobain Glass India",
-  "Jindal Aluminium",
-  "Schüco India",
-  "Reynaers Aluminium India"
-]
+{
+  "brand": "AIS Windows",
+  "country": "India",
+  "competitors": [
+    "Fenesta",
+    "Eternia by Hindalco",
+    "VEKA India",
+    "Schüco India",
+    "Reynaers Aluminium India",
+    "Weatherseal Windows",
+    "Prominance",
+    "Encraft India",
+    "Lingel Windows & Doors",
+    "Tostem India"
+  ]
+}
