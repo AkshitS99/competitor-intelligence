@@ -51,36 +51,40 @@ jobs:
         if: always() && steps.ads.outputs.exists == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: ads-json
+          name: competitor-ads-json
           path: output/ads.json
           retention-days: 30
+          if-no-files-found: warn
 
-      - name: Upload Logs
+      - name: Upload Playwright Logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs
-          path: logs/
+          name: playwright-logs
+          path: |
+            logs/
           retention-days: 30
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
       - name: Upload Reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: reports
-          path: reports/
+          name: scraper-reports
+          path: |
+            reports/
           retention-days: 30
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
       - name: Upload Assets
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: assets
-          path: assets/
+          name: scraper-assets
+          path: |
+            assets/
           retention-days: 30
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
       - name: Workflow Summary
         if: always()
@@ -89,4 +93,6 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- Workflow completed." >> $GITHUB_STEP_SUMMARY
           echo "- ads.json generated: ${{ steps.ads.outputs.exists }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Playwright executed successfully if no errors appear above." >> $GITHUB_STEP_SUMMARY
+          echo "- Playwright logs uploaded: logs/" >> $GITHUB_STEP_SUMMARY
+          echo "- Reports uploaded: reports/" >> $GITHUB_STEP_SUMMARY
+          echo "- Assets uploaded: assets/" >> $GITHUB_STEP_SUMMARY
