@@ -139,17 +139,29 @@ async function launch(page) {
       timeout: TIMEOUTS.navigation,
     });
 
-    // Allow the SPA to settle (hydration, initial async requests, etc.)
+    // Allow the SPA to stabilize
     await page.waitForTimeout(TIMEOUTS.stability);
 
-    const currentUrl = page.url();
-    log('INFO', `Meta Ad Library loaded. Current URL: ${currentUrl}`);
+    // Save screenshot for debugging
+    await page.screenshot({
+      path: 'logs/meta-home.png',
+      fullPage: true,
+    });
+
+    // Save HTML for debugging
+    const html = await page.content();
+    await require('fs').promises.writeFile(
+      'logs/meta-home.html',
+      html,
+      'utf8'
+    );
+
+    log('INFO', `Meta Ad Library loaded. Current URL: ${page.url()}`);
   } catch (err) {
     log('ERROR', `Failed to launch Meta Ad Library: ${err.message}`);
     throw err;
   }
 }
-
 // ---------------------------------------------------------------------------
 // 2. acceptCookies(page)
 // ---------------------------------------------------------------------------
@@ -276,33 +288,79 @@ async function searchBrand(page, brand) {
     return false;
   }
 
+  // Screenshot before searching
+  await page.screenshot({
+    path: `logs/before-search-${brand}.png`,
+    fullPage: true,
+  });
+
   return withRetry(
     async () => {
+
       const searchBox = page
         .getByRole('combobox', { name: /search/i })
         .or(page.getByPlaceholder(/search by keyword or advertiser/i))
         .or(page.locator('input[type="search"]'))
         .first();
 
-      await searchBox.waitFor({ state: 'visible', timeout: TIMEOUTS.selector });
+      await searchBox.waitFor({
+        state: 'visible',
+        timeout: TIMEOUTS.selector,
+      });
 
-      // Clear any previous search text before typing the new brand name.
+      await searchBox.click();
+
       await searchBox.fill('');
-      await searchBox.type(brand, { delay: 20 });
+
+      await searchBox.type(brand, {
+        delay: 40,
+      });
+
       await searchBox.press('Enter');
 
-      log('INFO', `Submitted search for brand: "${brand}"`);
+      log('INFO', `Submitted search for "${brand}"`);
 
-      // Wait for the results region to appear before declaring success.
-      await page.waitForSelector('[role="main"]', { timeout: TIMEOUTS.selector });
-      await page.waitForTimeout(TIMEOUTS.stability);
+      await page.waitForSelector('[role="main"]', {
+        timeout: TIMEOUTS.selector,
+      });
+
+      await page.waitForTimeout(3000);
+
+      // Screenshot after successful search
+      await page.screenshot({
+        path: `logs/after-search-${brand}.png`,
+        fullPage: true,
+      });
 
       return true;
     },
-    { label: `searchBrand("${brand}")`, fallback: false }
-  );
-}
+    {
+      label: `searchBrand("${brand}")`,
+      fallback: false,
+    }
+  ).catch(async (err) => {
 
+    // Save screenshot on failure
+    await page.screenshot({
+      path: `logs/error-${brand}.png`,
+      fullPage: true,
+    }).catch(() => {});
+
+    // Save HTML on failure
+    const html = await page.content().catch(() => '');
+    if (html) {
+      await require('fs').promises.writeFile(
+        `logs/error-${brand}.html`,
+        html,
+        'utf8'
+      ).catch(() => {});
+    }
+
+    log('ERROR', `Search failed for "${brand}": ${err.message}`);
+
+    return false;
+  });
+}
 // ---------------------------------------------------------------------------
 // 5. waitForAds(page)
 // ---------------------------------------------------------------------------
