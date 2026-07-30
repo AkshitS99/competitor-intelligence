@@ -43,6 +43,7 @@ const { chromium } = require('playwright');
 const metaAdLibrary = require('./metaAdLibrary');
 const parser = require('./parser');
 const dataMerger = require('./dataMerger');
+const downloader = require('./downloader');
 const {
   attachNetworkInterceptor,
   getCapturedResponses,
@@ -764,6 +765,43 @@ async function processCompetitor(page, competitor) {
     // dataMerger.mergeAds(extraction.ads, []) — the scraper continues to
     // work exactly as before using DOM ads only.
     const merged = dataMerger.mergeAds(extraction.ads, graphqlAds);
+    // --- Asset download: fetch every image/video referenced in the
+    // merged ads (delegated to ./downloader). Wrapped defensively so a
+    // download-layer problem never turns an otherwise-successful
+    // competitor result into a failure — downloader.js is designed to
+    // never throw, but this guards against any unexpected surprise.
+    let assetStats = { downloadedImages: 0, downloadedVideos: 0, skipped: 0, failed: [] };
+    try {
+      assetStats = await downloader.downloadAssets(merged.ads, PATHS.assets);
+      await Logger.info(
+        `Downloaded assets for "${competitor}": ${assetStats.downloadedImages} image(s), ` +
+          `${assetStats.downloadedVideos} video(s), ${assetStats.skipped} skipped, ` +
+          `${assetStats.failed.length} failed`
+      );
+    } catch (err) {
+      await Logger.warn(`Asset download failed unexpectedly for "${competitor}": ${err.message}`);
+    }
+
+    await Logger.info(
+      `Successfully processed competitor: "${competitor}" - ${merged.ads.length} merged ad(s)`
+    );
+
+    return {
+      competitor,
+      success: true,
+      ads: merged.ads,
+      stats: {
+        ...extraction.stats,
+        ...merged.stats,
+        assets: assetStats,
+        network: {
+          responseCount: network.responseCount,
+          edgeCount: network.edgeCount,
+          hasNextPage: network.hasNextPage,
+        },
+      },
+      network,
+    };
 
     await Logger.info(
       `Successfully processed competitor: "${competitor}" - ${merged.ads.length} merged ad(s)`
