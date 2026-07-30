@@ -1205,17 +1205,13 @@ async function closePopups(page){
 module.exports = {
 
 
-  launch,
-
-  acceptCookies,
-
-  selectCountry,
-
-  searchBrand,
-
-  waitForAds,
-
-  closePopups,
+ launch,
+    acceptCookies,
+    selectCountry,
+    closePopups,
+    searchBrand,
+    waitForAds,
+    scrollUntilStable
 
 
 };
