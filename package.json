@@ -1,1 +1,29 @@
-
+{
+  "name": "playwright-scraper",
+  "version": "1.0.0",
+  "description": "A production-ready Playwright-based web scraping project",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "scrape": "node scrape.js"
+  },
+  "keywords": [
+    "playwright",
+    "scraper",
+    "automation",
+    "web-scraping"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "playwright": "^1.47.0",
+    "axios": "^1.7.7",
+    "cheerio": "^1.0.0",
+    "fs-extra": "^11.2.0",
+    "dotenv": "^16.4.5"
+  }
+}
