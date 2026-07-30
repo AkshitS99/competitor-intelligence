@@ -282,84 +282,66 @@ async function selectCountry(page, country) {
  * @param {string} brand
  * @returns {Promise<boolean>} true if the search was submitted and results appeared, false otherwise
  */
-async function searchBrand(page, brand) {
-  if (!brand || typeof brand !== 'string') {
-    log('WARN', 'searchBrand called without a valid brand value.');
-    return false;
+async searchBrand(page, brand) {
+  this.logger.info(`Searching advertiser: ${brand}`);
+
+  const searchSelectors = [
+    'input[placeholder*="Search"]',
+    'input[placeholder*="search"]',
+    'input[aria-label*="Search"]',
+    'input[aria-label*="search"]',
+    'input[type="text"]',
+    'input[type="search"]',
+    '[role="combobox"]',
+    'textarea'
+  ];
+
+  let searchInput = null;
+
+  for (const selector of searchSelectors) {
+    try {
+      const locator = page.locator(selector).first();
+
+      if (await locator.isVisible({ timeout: 3000 })) {
+        searchInput = locator;
+        this.logger.info(`Search input found using selector: ${selector}`);
+        break;
+      }
+
+    } catch (error) {
+      continue;
+    }
   }
 
-  // Screenshot before searching
-  await page.screenshot({
-    path: `logs/before-search-${brand}.png`,
-    fullPage: true,
-  });
-
-  return withRetry(
-    async () => {
-
-      const searchBox = page
-        .getByRole('combobox', { name: /search/i })
-        .or(page.getByPlaceholder(/search by keyword or advertiser/i))
-        .or(page.locator('input[type="search"]'))
-        .first();
-
-      await searchBox.waitFor({
-        state: 'visible',
-        timeout: TIMEOUTS.selector,
-      });
-
-      await searchBox.click();
-
-      await searchBox.fill('');
-
-      await searchBox.type(brand, {
-        delay: 40,
-      });
-
-      await searchBox.press('Enter');
-
-      log('INFO', `Submitted search for "${brand}"`);
-
-      await page.waitForSelector('[role="main"]', {
-        timeout: TIMEOUTS.selector,
-      });
-
-      await page.waitForTimeout(3000);
-
-      // Screenshot after successful search
-      await page.screenshot({
-        path: `logs/after-search-${brand}.png`,
-        fullPage: true,
-      });
-
-      return true;
-    },
-    {
-      label: `searchBrand("${brand}")`,
-      fallback: false,
-    }
-  ).catch(async (err) => {
-
-    // Save screenshot on failure
+  if (!searchInput) {
     await page.screenshot({
-      path: `logs/error-${brand}.png`,
-      fullPage: true,
-    }).catch(() => {});
+      path: `logs/screenshots/search-input-not-found-${Date.now()}.png`,
+      fullPage: true
+    });
 
-    // Save HTML on failure
-    const html = await page.content().catch(() => '');
-    if (html) {
-      await require('fs').promises.writeFile(
-        `logs/error-${brand}.html`,
-        html,
-        'utf8'
-      ).catch(() => {});
-    }
+    throw new Error(
+      `Unable to locate Meta Ad Library search input for ${brand}`
+    );
+  }
 
-    log('ERROR', `Search failed for "${brand}": ${err.message}`);
 
-    return false;
-  });
+  await searchInput.click();
+
+  await searchInput.fill(brand);
+
+  await page.waitForTimeout(2000);
+
+
+  await page.keyboard.press("Enter");
+
+
+  await page.waitForTimeout(8000);
+
+
+  this.logger.info(
+    `Search submitted successfully for advertiser: ${brand}`
+  );
+}  });
 }
 // ---------------------------------------------------------------------------
 // 5. waitForAds(page)
