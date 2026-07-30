@@ -4,14 +4,10 @@ on:
   workflow_dispatch:
 
   schedule:
-    # Every Monday at 09:00 UTC
-    - cron: "0 9 * * 1"
+    - cron: '0 9 * * 1'
 
 permissions:
   contents: read
-
-env:
-  CI: true
 
 concurrency:
   group: ${{ github.workflow }}
@@ -19,81 +15,44 @@ concurrency:
 
 jobs:
   scrape:
-    name: Run Competitor Intelligence Scraper
+    name: Run Competitor Ad Scraper
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
-          cache: "npm"
+          node-version: '22'
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: npm install
 
-      - name: Cache Playwright Browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-playwright-
-
       - name: Install Playwright Browsers
-        run: npx playwright install --with-deps
-
-      - name: Create Required Directories
-        run: |
-          mkdir -p output
-          mkdir -p reports
-          mkdir -p logs
-          mkdir -p assets
+        run: npx playwright install --with-deps chromium
 
       - name: Run Scraper
         run: npm run scrape
 
-      - name: Verify ads.json
-        id: verify_ads
+      - name: Check for ads.json
         if: always()
+        id: ads
         run: |
-          if [ -f "output/ads.json" ]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "✅ ads.json found"
-            ls -lh output/ads.json
+          if [ -f output/ads.json ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "❌ ads.json not found"
+            echo "exists=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Upload ads.json
-        if: always() && steps.verify_ads.outputs.exists == 'true'
+        if: always() && steps.ads.outputs.exists == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ads-json
           path: output/ads.json
-          retention-days: 30
-
-      - name: Upload Reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: reports
-          path: reports/
-          if-no-files-found: ignore
-          retention-days: 30
-
-      - name: Upload Assets
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: assets
-          path: assets/
-          if-no-files-found: ignore
           retention-days: 30
 
       - name: Upload Logs
@@ -102,18 +61,32 @@ jobs:
         with:
           name: logs
           path: logs/
-          if-no-files-found: ignore
           retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: reports/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload Assets
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: assets
+          path: assets/
+          retention-days: 30
+          if-no-files-found: ignore
 
       - name: Workflow Summary
         if: always()
         run: |
-          echo "# 🚀 AIS Windows Competitor Intelligence" >> $GITHUB_STEP_SUMMARY
+          echo "## AIS Windows Competitor Intelligence" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Item | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Workflow | Completed |" >> $GITHUB_STEP_SUMMARY
-          echo "| ads.json | ${{ steps.verify_ads.outputs.exists }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Reports | Uploaded if available |" >> $GITHUB_STEP_SUMMARY
-          echo "| Assets | Uploaded if available |" >> $GITHUB_STEP_SUMMARY
-          echo "| Logs | Uploaded if available |" >> $GITHUB_STEP_SUMMARY
+          echo "- Workflow completed." >> $GITHUB_STEP_SUMMARY
+          echo "- ads.json generated: ${{ steps.ads.outputs.exists }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Playwright executed successfully if no errors appear above." >> $GITHUB_STEP_SUMMARY
