@@ -1,6 +1,9 @@
 {
   "brand": "AIS Windows",
   "country": "India",
+  "language": "en",
+  "adStatus": "active",
+  "mediaType": "all",
   "competitors": [
     "Fenesta",
     "Eternia by Hindalco",
