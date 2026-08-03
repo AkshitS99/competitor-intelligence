@@ -611,23 +611,56 @@ async function closePopups(page){
 // -----------------------------------------------------------------
 // 2. NAVIGATE DIRECTLY TO COMPETITOR META AD LIBRARY URL
 // -----------------------------------------------------------------
+async function navigateToCompetitorUrl(page, competitorUrl) {
+  if (!competitorUrl || typeof competitorUrl !== 'string') {
+    log(
+      'ERROR',
+      'navigateToCompetitorUrl called without a valid competitor URL'
+    );
 
-await Logger.info(
-  `Navigating directly to Meta Ad Library URL for "${competitor}"`
-);
+    return false;
+  }
 
-const navigationSucceeded =
-  await metaAdLibrary.navigateToCompetitorUrl(
-    page,
-    competitorUrl
-  );
+  try {
+    log(
+      'INFO',
+      `Navigating directly to competitor Meta Ad Library URL: ${competitorUrl}`
+    );
 
-if (!navigationSucceeded) {
-  throw new Error(
-    `Failed to navigate to Meta Ad Library URL for "${competitor}"`
-  );
+    await page.goto(competitorUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: TIMEOUTS.navigation
+    });
+
+    await page.waitForTimeout(TIMEOUTS.stability);
+
+    log(
+      'INFO',
+      `Competitor Meta Ad Library page loaded. Current URL: ${page.url()}`
+    );
+
+    await page.screenshot({
+      path: `logs/screenshots/competitor-page-${Date.now()}.png`,
+      fullPage: true
+    }).catch(() => {});
+
+    await fs.promises.writeFile(
+      `logs/html/competitor-page-${Date.now()}.html`,
+      await page.content(),
+      'utf8'
+    ).catch(() => {});
+
+    return true;
+
+  } catch (err) {
+    log(
+      'ERROR',
+      `Failed to navigate to competitor Meta Ad Library URL: ${err.message}`
+    );
+
+    return false;
+  }
 }
-
 // -----------------------------------------------------------------
 // 3. ACCEPT COOKIES / CLOSE POPUPS
 // -----------------------------------------------------------------
