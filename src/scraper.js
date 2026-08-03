@@ -243,37 +243,109 @@ async function updateAdsOutput(status, competitors) {
 async function loadCompetitorConfig() {
   try {
     const exists = await fs.pathExists(PATHS.config);
+
     if (!exists) {
       throw new Error(`Config file not found at ${PATHS.config}`);
     }
 
     const data = await fs.readJson(PATHS.config);
-    const rawList = Array.isArray(data) ? data : data.competitors;
-    const country = (!Array.isArray(data) && data.country) || DEFAULT_COUNTRY;
+
+    const rawList = Array.isArray(data)
+      ? data
+      : data.competitors;
+
+    const country =
+      (!Array.isArray(data) && data.country) ||
+      DEFAULT_COUNTRY;
 
     if (!Array.isArray(rawList) || rawList.length === 0) {
-      throw new Error('competitors.json must contain a non-empty array of competitor names');
+      throw new Error(
+        'competitors.json must contain a non-empty array of competitors'
+      );
     }
 
     const competitors = rawList
-      .map((entry) => (typeof entry === 'string' ? entry.trim() : entry?.name?.trim()))
-      .filter(Boolean);
+      .map((entry) => {
+        // New URL-based format
+        if (
+          entry &&
+          typeof entry === 'object' &&
+          entry.name &&
+          entry.url
+        ) {
+          return {
+            name: String(entry.name).trim(),
+            url: String(entry.url).trim(),
+          };
+        }
+
+        // Backward compatibility for old string format
+        if (typeof entry === 'string') {
+          return {
+            name: entry.trim(),
+            url: null,
+          };
+        }
+
+        // Backward compatibility for objects without URL
+        if (
+          entry &&
+          typeof entry === 'object' &&
+          entry.name
+        ) {
+          return {
+            name: String(entry.name).trim(),
+            url: null,
+          };
+        }
+
+        return null;
+      })
+      .filter(
+        (entry) =>
+          entry &&
+          entry.name
+      );
 
     if (competitors.length === 0) {
-      throw new Error('No valid competitor names could be parsed from competitors.json');
+      throw new Error(
+        'No valid competitors could be parsed from competitors.json'
+      );
+    }
+
+    const missingUrls = competitors.filter(
+      (competitor) => !competitor.url
+    );
+
+    if (missingUrls.length > 0) {
+      await Logger.warn(
+        `${missingUrls.length} competitor(s) do not have a direct Meta Ad Library URL.`
+      );
     }
 
     await Logger.info(
       `Loaded ${competitors.length} competitor(s) from config/competitors.json (country: "${country}")`
     );
 
-    return { country, competitors };
+    for (const competitor of competitors) {
+      await Logger.info(
+        `Configured competitor: "${competitor.name}" -> ${competitor.url || 'NO DIRECT URL'}`
+      );
+    }
+
+    return {
+      country,
+      competitors,
+    };
+
   } catch (err) {
-    await Logger.error(`Failed to load competitor config: ${err.message}`);
+    await Logger.error(
+      `Failed to load competitor config: ${err.message}`
+    );
+
     throw err;
   }
 }
-
 // ---------------------------------------------------------------------------
 // Browser: launch Chromium with realistic desktop settings
 // ---------------------------------------------------------------------------
