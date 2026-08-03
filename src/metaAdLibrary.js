@@ -588,13 +588,6 @@ async function selectCountry(page, country) {
 
 }
 
-
-
-
-// ---------------------------------------------------------------------------
-// 4. searchBrand(page, brand)
-// ---------------------------------------------------------------------------
-
 // ---------------------------------------------------------------------------
 // 4. searchBrand(page, brand)
 // ---------------------------------------------------------------------------
@@ -610,13 +603,11 @@ async function searchBrand(page, brand) {
         `Searching advertiser: ${brand}`
       );
 
-      // IMPORTANT:
-      // Do NOT use [role="combobox"] directly as an input.
-      // Meta may render the combobox as a <div>.
-      // We specifically look for editable <input>/<textarea> elements.
+      // ---------------------------------------------------------------------
+      // STEP 1: Look for an already-visible editable input
+      // ---------------------------------------------------------------------
 
-      const searchSelectors = [
-
+      const inputSelectors = [
         'input[placeholder*="Search"]',
         'input[placeholder*="search"]',
         'input[aria-label*="Search"]',
@@ -625,32 +616,22 @@ async function searchBrand(page, brand) {
         'input[type="text"]',
         'textarea[placeholder*="Search"]',
         'textarea[placeholder*="search"]'
-
       ];
 
       let searchInput = null;
 
-      // ---------------------------------------------------------------------
-      // Find a REAL editable search input
-      // ---------------------------------------------------------------------
-
-      for (const selector of searchSelectors) {
+      for (const selector of inputSelectors) {
 
         try {
 
-          const locator = page
-            .locator(selector)
-            .filter({ visible: true })
-            .first();
+          const locator = page.locator(selector).first();
 
-          const count = await locator.count();
-
-          if (count === 0) {
+          if (await locator.count() === 0) {
             continue;
           }
 
           const visible = await locator
-            .isVisible({ timeout: 2000 })
+            .isVisible({ timeout: 1500 })
             .catch(() => false);
 
           if (!visible) {
@@ -658,7 +639,7 @@ async function searchBrand(page, brand) {
           }
 
           const editable = await locator
-            .isEditable({ timeout: 2000 })
+            .isEditable({ timeout: 1500 })
             .catch(() => false);
 
           if (!editable) {
@@ -675,75 +656,146 @@ async function searchBrand(page, brand) {
           break;
 
         } catch (err) {
-
           continue;
-
         }
-
       }
 
       // ---------------------------------------------------------------------
-      // Fallback: locate an editable input inside a combobox
+      // STEP 2: If input isn't available, click Meta's combobox
       // ---------------------------------------------------------------------
 
       if (!searchInput) {
 
         try {
 
-          const combobox = page
-            .getByRole('combobox')
-            .first();
+          const comboboxes = page.getByRole('combobox');
 
-          const comboboxVisible = await combobox
-            .isVisible({ timeout: 2000 })
-            .catch(() => false);
+          const count = await comboboxes.count();
 
-          if (comboboxVisible) {
+          log(
+            'INFO',
+            `Found ${count} combobox element(s) while locating search.`
+          );
 
-            const nestedInput = combobox
-              .locator('input, textarea, [contenteditable="true"]')
-              .first();
+          for (let i = 0; i < count; i++) {
 
-            const nestedCount = await nestedInput.count();
+            const combobox = comboboxes.nth(i);
 
-            if (nestedCount > 0) {
+            const visible = await combobox
+              .isVisible({ timeout: 1500 })
+              .catch(() => false);
 
-              const nestedVisible = await nestedInput
-                .isVisible({ timeout: 2000 })
-                .catch(() => false);
+            if (!visible) {
+              continue;
+            }
 
-              const nestedEditable = await nestedInput
-                .isEditable({ timeout: 2000 })
-                .catch(() => false);
+            log(
+              'INFO',
+              `Clicking visible Meta combobox ${i + 1}/${count} to activate search.`
+            );
 
-              if (nestedVisible && nestedEditable) {
+            await combobox.click({
+              timeout: TIMEOUTS.short
+            }).catch(() => {});
 
-                searchInput = nestedInput;
+            // Give Meta time to render the real input.
+            await page.waitForTimeout(500);
+
+            // ---------------------------------------------------------------
+            // Search again for actual editable input
+            // ---------------------------------------------------------------
+
+            for (const selector of inputSelectors) {
+
+              try {
+
+                const locator = page.locator(selector).first();
+
+                if (await locator.count() === 0) {
+                  continue;
+                }
+
+                const visible = await locator
+                  .isVisible({ timeout: 1000 })
+                  .catch(() => false);
+
+                if (!visible) {
+                  continue;
+                }
+
+                const editable = await locator
+                  .isEditable({ timeout: 1000 })
+                  .catch(() => false);
+
+                if (!editable) {
+                  continue;
+                }
+
+                searchInput = locator;
 
                 log(
                   'INFO',
-                  'Search input found inside Meta combobox.'
+                  `Search input became available after activating combobox: ${selector}`
                 );
 
-              }
+                break;
 
+              } catch (err) {
+                continue;
+              }
             }
 
+            if (searchInput) {
+              break;
+            }
           }
 
         } catch (err) {
 
           log(
             'WARN',
-            `Combobox fallback failed: ${err.message}`
+            `Failed to activate Meta search combobox: ${err.message}`
           );
 
         }
-
       }
 
       // ---------------------------------------------------------------------
-      // If no actual editable input exists, capture diagnostics
+      // STEP 3: Final fallback — search for contenteditable
+      // ---------------------------------------------------------------------
+
+      if (!searchInput) {
+
+        try {
+
+          const contentEditable = page
+            .locator('[contenteditable="true"]')
+            .first();
+
+          const visible = await contentEditable
+            .isVisible({ timeout: 1500 })
+            .catch(() => false);
+
+          if (visible) {
+
+            searchInput = contentEditable;
+
+            log(
+              'INFO',
+              'Search input found using contenteditable fallback.'
+            );
+
+          }
+
+        } catch (err) {
+
+          // Ignore and continue to diagnostics.
+
+        }
+      }
+
+      // ---------------------------------------------------------------------
+      // STEP 4: Give up only after all methods fail
       // ---------------------------------------------------------------------
 
       if (!searchInput) {
@@ -751,32 +803,24 @@ async function searchBrand(page, brand) {
         const timestamp = Date.now();
 
         await page.screenshot({
-
           path:
             `logs/screenshots/search-input-not-found-${timestamp}.png`,
-
           fullPage: true
-
         }).catch(() => {});
 
         await fs.promises.writeFile(
-
           `logs/html/search-input-not-found-${timestamp}.html`,
-
           await page.content(),
-
           'utf8'
-
         ).catch(() => {});
 
         throw new Error(
           `Unable to locate an editable Meta Ad Library search input for "${brand}"`
         );
-
       }
 
       // ---------------------------------------------------------------------
-      // Clear previous search
+      // STEP 5: Clear existing search
       // ---------------------------------------------------------------------
 
       await searchInput.click({
@@ -788,7 +832,7 @@ async function searchBrand(page, brand) {
       });
 
       // ---------------------------------------------------------------------
-      // Enter competitor name
+      // STEP 6: Enter competitor name
       // ---------------------------------------------------------------------
 
       await searchInput.fill(
@@ -803,12 +847,11 @@ async function searchBrand(page, brand) {
         `Entered advertiser name: ${brand}`
       );
 
-      // Give Meta time to render autocomplete/search state.
-      await page.waitForTimeout(1500);
+      // ---------------------------------------------------------------------
+      // STEP 7: Submit search
+      // ---------------------------------------------------------------------
 
-      // ---------------------------------------------------------------------
-      // Submit search
-      // ---------------------------------------------------------------------
+      await page.waitForTimeout(1000);
 
       await searchInput.press('Enter').catch(async () => {
 
@@ -821,20 +864,16 @@ async function searchBrand(page, brand) {
         `Search submitted successfully for advertiser: ${brand}`
       );
 
-      // Give the results page time to load before waitForAds().
+      // ---------------------------------------------------------------------
+      // STEP 8: Allow results page to load
+      // ---------------------------------------------------------------------
+
       await page.waitForTimeout(8000);
 
-      // ---------------------------------------------------------------------
-      // Diagnostic screenshot
-      // ---------------------------------------------------------------------
-
       await page.screenshot({
-
         path:
           `logs/screenshots/search-results-${Date.now()}.png`,
-
         fullPage: true
-
       }).catch(() => {});
 
       return true;
@@ -842,23 +881,17 @@ async function searchBrand(page, brand) {
     },
 
     {
-
       label: `searchBrand("${brand}")`,
-
       maxAttempts: RETRY.maxAttempts,
-
       delayMs: RETRY.delayMs,
-
       fallback: false
-
     }
 
   );
 
-}// ---------------------------------------------------------------------------
-// 5. waitForAds(page)
-// ---------------------------------------------------------------------------
+}
 
+}
 // ---------------------------------------------------------------------------
 // 5. waitForAds(page)
 // ---------------------------------------------------------------------------
