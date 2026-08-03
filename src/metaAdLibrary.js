@@ -890,6 +890,7 @@ async function searchBrand(page, brand) {
   );
 
 }
+}
 // ---------------------------------------------------------------------------
 // 5. waitForAds(page)
 // ---------------------------------------------------------------------------
@@ -902,67 +903,28 @@ async function waitForAds(page) {
 
       log(
         'INFO',
-        'Waiting for Meta ad results...'
+        'Waiting for Meta Ad Library results...'
       );
 
-      // ---------------------------------------------------------------------
-      // IMPORTANT:
-      //
-      // Do NOT use:
-      //
-      // a[href*="/ads/library/"]
-      //
-      // as an ad detector.
-      //
-      // Meta uses /ads/library/ links throughout the page, including
-      // navigation and non-ad elements. This previously caused:
-      //
-      // "Ad results detected"
-      //
-      // even when there were actually ZERO ads.
-      // ---------------------------------------------------------------------
-
-      const resultSignals = [
-
-        // Strong textual signals
-        page.getByText(/Library ID/i).first(),
-
-        page.getByText(/Active ads/i).first(),
-
-        page.getByText(/Ads from/i).first(),
-
-        // Actual article-style result containers
-        page.locator('div[role="article"]').first(),
-
-        // Meta's common ad-card/test-id patterns
-        page.locator('[data-testid*="ad-card"]').first(),
-
-        page.locator('[data-testid*="AdCard"]').first(),
-
-        page.locator('[data-pagelet*="AdLibrary"]').first()
-
-      ];
+      // Give Meta time to finish rendering / network requests.
+      await page.waitForTimeout(5000);
 
       // ---------------------------------------------------------------------
-      // First give the results page time to settle.
+      // Capture current page state
       // ---------------------------------------------------------------------
 
-      await page.waitForTimeout(3000);
+      let currentUrl = '';
 
-      // ---------------------------------------------------------------------
-      // Check whether Meta is explicitly showing zero results.
-      // ---------------------------------------------------------------------
+      try {
+        currentUrl = page.url();
+      } catch (err) {
+        currentUrl = 'UNKNOWN';
+      }
 
-      const zeroResultPatterns = [
-
-        /no ads/i,
-        /no active ads/i,
-        /no results/i,
-        /we couldn't find/i,
-        /couldn't find any ads/i,
-        /didn't find any ads/i
-
-      ];
+      log(
+        'INFO',
+        `Current page URL after search: ${currentUrl}`
+      );
 
       let bodyText = '';
 
@@ -974,17 +936,56 @@ async function waitForAds(page) {
 
       } catch (err) {
 
-        bodyText = '';
+        log(
+          'WARN',
+          `Could not read page body: ${err.message}`
+        );
 
       }
 
-      for (const pattern of zeroResultPatterns) {
+      // ---------------------------------------------------------------------
+      // Log useful page text for debugging
+      // ---------------------------------------------------------------------
 
-        if (pattern.test(bodyText)) {
+      const compactText = bodyText
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      log(
+        'INFO',
+        `Page text length: ${compactText.length} characters`
+      );
+
+      log(
+        'INFO',
+        `Page text preview: ${compactText.substring(0, 1500)}`
+      );
+
+      // ---------------------------------------------------------------------
+      // Look for explicit zero-result messages
+      // ---------------------------------------------------------------------
+
+      const noResultPatterns = [
+
+        /no ads/i,
+        /no active ads/i,
+        /no results/i,
+        /couldn't find/i,
+        /could not find/i,
+        /didn't find/i,
+        /did not find/i,
+        /no advertisements/i,
+        /there are no/i
+
+      ];
+
+      for (const pattern of noResultPatterns) {
+
+        if (pattern.test(compactText)) {
 
           log(
             'INFO',
-            `Meta explicitly indicates no ads were found (${pattern}).`
+            `Meta appears to have returned a zero-result state: ${pattern}`
           );
 
           return true;
@@ -994,97 +995,124 @@ async function waitForAds(page) {
       }
 
       // ---------------------------------------------------------------------
-      // Check for actual result signals
+      // Count potentially useful DOM signals
       // ---------------------------------------------------------------------
 
-      let detectedSignal = null;
+      const selectors = {
 
-      for (const locator of resultSignals) {
+        articles:
+          'div[role="article"]',
+
+        links:
+          'a[href*="/ads/library/"]',
+
+        images:
+          'img',
+
+        videos:
+          'video',
+
+        buttons:
+          'button',
+
+        textboxes:
+          'input, textarea, [contenteditable="true"]',
+
+        adTestIds:
+          '[data-testid*="ad"]',
+
+        pagelets:
+          '[data-pagelet*="AdLibrary"]'
+
+      };
+
+      const counts = {};
+
+      for (const [name, selector] of Object.entries(selectors)) {
 
         try {
 
-          const visible = await locator
-            .isVisible({
-              timeout: 1500
-            })
-            .catch(() => false);
-
-          if (visible) {
-
-            detectedSignal = locator;
-
-            break;
-
-          }
+          counts[name] = await page.locator(selector).count();
 
         } catch (err) {
 
-          continue;
+          counts[name] = 0;
+
+        }
+
+      }
+
+      log(
+        'INFO',
+        `DOM diagnostic counts: ${JSON.stringify(counts)}`
+      );
+
+      // ---------------------------------------------------------------------
+      // Look for Library ID text in the complete page
+      // ---------------------------------------------------------------------
+
+      const libraryIdMatches =
+        compactText.match(/library\s*id/gi) || [];
+
+      if (libraryIdMatches.length > 0) {
+
+        log(
+          'INFO',
+          `Found ${libraryIdMatches.length} "Library ID" text occurrence(s).`
+        );
+
+        return true;
+
+      }
+
+      // ---------------------------------------------------------------------
+      // Look for common Meta Ad Library result indicators
+      // ---------------------------------------------------------------------
+
+      const resultPatterns = [
+
+        /active ads/i,
+        /ads from/i,
+        /advertiser/i,
+        /started running/i,
+        /see ad details/i,
+        /sponsored/i
+
+      ];
+
+      let resultSignalCount = 0;
+
+      for (const pattern of resultPatterns) {
+
+        if (pattern.test(compactText)) {
+
+          resultSignalCount += 1;
+
+          log(
+            'INFO',
+            `Detected page result signal: ${pattern}`
+          );
 
         }
 
       }
 
       // ---------------------------------------------------------------------
-      // Additional validation:
-      //
-      // We require an actual "Library ID" signal or multiple ad-like
-      // containers before declaring that ads exist.
+      // If multiple strong signals exist, allow parser to inspect page.
       // ---------------------------------------------------------------------
 
-      let libraryIdCount = 0;
-
-      try {
-
-        libraryIdCount = await page
-          .getByText(/Library ID/i)
-          .count();
-
-      } catch (err) {
-
-        libraryIdCount = 0;
-
-      }
-
-      let articleCount = 0;
-
-      try {
-
-        articleCount = await page
-          .locator('div[role="article"]')
-          .count();
-
-      } catch (err) {
-
-        articleCount = 0;
-
-      }
-
-      let adCardCount = 0;
-
-      try {
-
-        adCardCount =
-          await page
-            .locator('[data-testid*="ad-card"], [data-testid*="AdCard"]')
-            .count();
-
-      } catch (err) {
-
-        adCardCount = 0;
-
-      }
-
-      // ---------------------------------------------------------------------
-      // Strongest confirmation:
-      // Library ID exists.
-      // ---------------------------------------------------------------------
-
-      if (libraryIdCount > 0) {
+      if (
+        resultSignalCount >= 2 &&
+        (
+          counts.articles > 0 ||
+          counts.adTestIds > 0 ||
+          counts.pagelets > 0
+        )
+      ) {
 
         log(
           'INFO',
-          `Ad results detected: ${libraryIdCount} Library ID signal(s).`
+          'Multiple Meta Ad Library result signals detected.'
         );
 
         return true;
@@ -1092,36 +1120,7 @@ async function waitForAds(page) {
       }
 
       // ---------------------------------------------------------------------
-      // Alternative confirmation:
-      // Multiple actual article/ad-card containers.
-      // ---------------------------------------------------------------------
-
-      if (articleCount > 0 || adCardCount > 0) {
-
-        log(
-          'INFO',
-          `Potential ad results detected (articles: ${articleCount}, ad cards: ${adCardCount}).`
-        );
-
-        return true;
-
-      }
-
-      // ---------------------------------------------------------------------
-      // Generic signals alone are NOT enough.
-      // ---------------------------------------------------------------------
-
-      if (detectedSignal) {
-
-        log(
-          'INFO',
-          'Meta results page detected, but no confirmed ad cards/Library IDs yet. Continuing to wait.'
-        );
-
-      }
-
-      // ---------------------------------------------------------------------
-      // No confirmed ads.
+      // Save complete diagnostics before retrying
       // ---------------------------------------------------------------------
 
       const timestamp = Date.now();
@@ -1129,7 +1128,7 @@ async function waitForAds(page) {
       await page.screenshot({
 
         path:
-          `logs/screenshots/no-ad-results-${timestamp}.png`,
+          `logs/screenshots/wait-for-ads-${timestamp}.png`,
 
         fullPage: true
 
@@ -1137,7 +1136,7 @@ async function waitForAds(page) {
 
       await fs.promises.writeFile(
 
-        `logs/html/no-ad-results-${timestamp}.html`,
+        `logs/html/wait-for-ads-${timestamp}.html`,
 
         await page.content(),
 
@@ -1145,8 +1144,22 @@ async function waitForAds(page) {
 
       ).catch(() => {});
 
+      await fs.promises.writeFile(
+
+        `logs/html/wait-for-ads-${timestamp}.txt`,
+
+        compactText,
+
+        'utf8'
+
+      ).catch(() => {});
+
+      // ---------------------------------------------------------------------
+      // No confirmed result yet
+      // ---------------------------------------------------------------------
+
       throw new Error(
-        'No confirmed Meta ad result cards or Library IDs detected'
+        'Meta Ad Library results could not be confirmed from current page state'
       );
 
     },
@@ -1165,7 +1178,10 @@ async function waitForAds(page) {
 
   );
 
-}// ---------------------------------------------------------------------------
+}
+
+
+// ---------------------------------------------------------------------------
 // 6. scrollUntilStable(page)
 // ---------------------------------------------------------------------------
 
