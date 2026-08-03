@@ -595,110 +595,86 @@ async function selectCountry(page, country) {
 // 4. searchBrand(page, brand)
 // ---------------------------------------------------------------------------
 
-async function searchBrand(page, brand) {
+// ---------------------------------------------------------------------------
+// 4. searchBrand(page, brand)
+// ---------------------------------------------------------------------------
 
+async function searchBrand(page, brand) {
 
   return withRetry(
 
-    async()=>{
-
+    async () => {
 
       log(
-
         'INFO',
-
         `Searching advertiser: ${brand}`
-
       );
 
-
-
+      // IMPORTANT:
+      // Do NOT use [role="combobox"] directly as an input.
+      // Meta may render the combobox as a <div>.
+      // We specifically look for editable <input>/<textarea> elements.
 
       const searchSelectors = [
 
-
-        // Meta current search patterns
-
-        'input[aria-label*="Search"]',
-
-        'input[aria-label*="search"]',
-
         'input[placeholder*="Search"]',
-
         'input[placeholder*="search"]',
-
+        'input[aria-label*="Search"]',
+        'input[aria-label*="search"]',
         'input[type="search"]',
-
         'input[type="text"]',
-
-        '[role="combobox"]'
+        'textarea[placeholder*="Search"]',
+        'textarea[placeholder*="search"]'
 
       ];
 
-
-
-
       let searchInput = null;
 
+      // ---------------------------------------------------------------------
+      // Find a REAL editable search input
+      // ---------------------------------------------------------------------
 
+      for (const selector of searchSelectors) {
 
+        try {
 
-      for(const selector of searchSelectors){
+          const locator = page
+            .locator(selector)
+            .filter({ visible: true })
+            .first();
 
+          const count = await locator.count();
 
-        try{
-
-
-          const locator =
-
-            page
-
-              .locator(selector)
-
-              .first();
-
-
-
-
-          const visible =
-
-            await locator
-
-              .isVisible({
-
-                timeout:3000
-
-              })
-
-              .catch(()=>false);
-
-
-
-
-          if(visible){
-
-
-            searchInput = locator;
-
-
-
-            log(
-
-              'INFO',
-
-              `Search input found using selector: ${selector}`
-
-            );
-
-
-
-            break;
-
+          if (count === 0) {
+            continue;
           }
 
+          const visible = await locator
+            .isVisible({ timeout: 2000 })
+            .catch(() => false);
 
+          if (!visible) {
+            continue;
+          }
 
-        }catch{
+          const editable = await locator
+            .isEditable({ timeout: 2000 })
+            .catch(() => false);
+
+          if (!editable) {
+            continue;
+          }
+
+          searchInput = locator;
+
+          log(
+            'INFO',
+            `Search input found using selector: ${selector}`
+          );
+
+          break;
+
+        } catch (err) {
 
           continue;
 
@@ -706,29 +682,82 @@ async function searchBrand(page, brand) {
 
       }
 
+      // ---------------------------------------------------------------------
+      // Fallback: locate an editable input inside a combobox
+      // ---------------------------------------------------------------------
 
+      if (!searchInput) {
 
+        try {
 
-      if(!searchInput){
+          const combobox = page
+            .getByRole('combobox')
+            .first();
 
+          const comboboxVisible = await combobox
+            .isVisible({ timeout: 2000 })
+            .catch(() => false);
 
+          if (comboboxVisible) {
+
+            const nestedInput = combobox
+              .locator('input, textarea, [contenteditable="true"]')
+              .first();
+
+            const nestedCount = await nestedInput.count();
+
+            if (nestedCount > 0) {
+
+              const nestedVisible = await nestedInput
+                .isVisible({ timeout: 2000 })
+                .catch(() => false);
+
+              const nestedEditable = await nestedInput
+                .isEditable({ timeout: 2000 })
+                .catch(() => false);
+
+              if (nestedVisible && nestedEditable) {
+
+                searchInput = nestedInput;
+
+                log(
+                  'INFO',
+                  'Search input found inside Meta combobox.'
+                );
+
+              }
+
+            }
+
+          }
+
+        } catch (err) {
+
+          log(
+            'WARN',
+            `Combobox fallback failed: ${err.message}`
+          );
+
+        }
+
+      }
+
+      // ---------------------------------------------------------------------
+      // If no actual editable input exists, capture diagnostics
+      // ---------------------------------------------------------------------
+
+      if (!searchInput) {
 
         const timestamp = Date.now();
-
-
 
         await page.screenshot({
 
           path:
-
             `logs/screenshots/search-input-not-found-${timestamp}.png`,
 
-          fullPage:true
+          fullPage: true
 
-        }).catch(()=>{});
-
-
-
+        }).catch(() => {});
 
         await fs.promises.writeFile(
 
@@ -738,241 +767,226 @@ async function searchBrand(page, brand) {
 
           'utf8'
 
-        ).catch(()=>{});
-
-
-
+        ).catch(() => {});
 
         throw new Error(
-
-          `Unable to locate Meta Ad Library search input for "${brand}"`
-
+          `Unable to locate an editable Meta Ad Library search input for "${brand}"`
         );
 
       }
 
-
-
-
+      // ---------------------------------------------------------------------
+      // Clear previous search
+      // ---------------------------------------------------------------------
 
       await searchInput.click({
+        timeout: TIMEOUTS.short
+      });
 
-        timeout:TIMEOUTS.short
+      await searchInput.fill('', {
+        timeout: TIMEOUTS.short
+      });
+
+      // ---------------------------------------------------------------------
+      // Enter competitor name
+      // ---------------------------------------------------------------------
+
+      await searchInput.fill(
+        brand,
+        {
+          timeout: TIMEOUTS.short
+        }
+      );
+
+      log(
+        'INFO',
+        `Entered advertiser name: ${brand}`
+      );
+
+      // Give Meta time to render autocomplete/search state.
+      await page.waitForTimeout(1500);
+
+      // ---------------------------------------------------------------------
+      // Submit search
+      // ---------------------------------------------------------------------
+
+      await searchInput.press('Enter').catch(async () => {
+
+        await page.keyboard.press('Enter');
 
       });
 
-
-
-
-
-      await searchInput.fill(
-
-        brand,
-
-        {
-
-          timeout:TIMEOUTS.short
-
-        }
-
-      );
-
-
-
-
       log(
-
         'INFO',
-
-        `Entered advertiser name: ${brand}`
-
-      );
-
-
-
-
-      await page.waitForTimeout(2000);
-
-
-
-
-      await page.keyboard.press('Enter');
-
-
-
-
-      log(
-
-        'INFO',
-
         `Search submitted successfully for advertiser: ${brand}`
-
       );
 
-
-
-
-      // Allow results page to render
-
+      // Give the results page time to load before waitForAds().
       await page.waitForTimeout(8000);
 
-
-
+      // ---------------------------------------------------------------------
+      // Diagnostic screenshot
+      // ---------------------------------------------------------------------
 
       await page.screenshot({
 
         path:
-
           `logs/screenshots/search-results-${Date.now()}.png`,
 
-        fullPage:true
+        fullPage: true
 
-      }).catch(()=>{});
-
-
-
+      }).catch(() => {});
 
       return true;
-
-
 
     },
 
     {
 
+      label: `searchBrand("${brand}")`,
 
-      label:`searchBrand("${brand}")`,
+      maxAttempts: RETRY.maxAttempts,
 
-      maxAttempts:RETRY.maxAttempts,
+      delayMs: RETRY.delayMs,
 
-      delayMs:RETRY.delayMs,
-
-      fallback:false
+      fallback: false
 
     }
 
   );
 
-}
+}// ---------------------------------------------------------------------------
+// 5. waitForAds(page)
+// ---------------------------------------------------------------------------
+
 // ---------------------------------------------------------------------------
 // 5. waitForAds(page)
 // ---------------------------------------------------------------------------
 
 async function waitForAds(page) {
 
-
   return withRetry(
 
-    async()=>{
-
+    async () => {
 
       log(
-
         'INFO',
-
         'Waiting for Meta ad results...'
-
       );
 
+      // ---------------------------------------------------------------------
+      // IMPORTANT:
+      //
+      // Do NOT use:
+      //
+      // a[href*="/ads/library/"]
+      //
+      // as an ad detector.
+      //
+      // Meta uses /ads/library/ links throughout the page, including
+      // navigation and non-ad elements. This previously caused:
+      //
+      // "Ad results detected"
+      //
+      // even when there were actually ZERO ads.
+      // ---------------------------------------------------------------------
 
+      const resultSignals = [
 
+        // Strong textual signals
+        page.getByText(/Library ID/i).first(),
 
-      const adSelectors = [
+        page.getByText(/Active ads/i).first(),
 
+        page.getByText(/Ads from/i).first(),
 
-        // Meta Ad Library containers
+        // Actual article-style result containers
+        page.locator('div[role="article"]').first(),
 
-        '[data-pagelet*="AdLibrary"]',
+        // Meta's common ad-card/test-id patterns
+        page.locator('[data-testid*="ad-card"]').first(),
 
-        '[data-testid*="ad"]',
+        page.locator('[data-testid*="AdCard"]').first(),
 
-        '[data-testid*="Ad"]',
-
-        'div[role="article"]',
-
-        'div[aria-label*="Ad"]',
-
-        'a[href*="/ads/library/"]',
-
-
-
-        // Text indicators
-
-        'text=/Library ID/i',
-
-        'text=/Sponsored/i',
-
-        'text=/Active ads/i',
-
-        'text=/Ads from/i'
+        page.locator('[data-pagelet*="AdLibrary"]').first()
 
       ];
 
+      // ---------------------------------------------------------------------
+      // First give the results page time to settle.
+      // ---------------------------------------------------------------------
 
+      await page.waitForTimeout(3000);
 
+      // ---------------------------------------------------------------------
+      // Check whether Meta is explicitly showing zero results.
+      // ---------------------------------------------------------------------
 
-      let adFound = false;
+      const zeroResultPatterns = [
 
+        /no ads/i,
+        /no active ads/i,
+        /no results/i,
+        /we couldn't find/i,
+        /couldn't find any ads/i,
+        /didn't find any ads/i
 
+      ];
 
+      let bodyText = '';
 
-      for(const selector of adSelectors){
+      try {
 
+        bodyText = await page.locator('body').innerText({
+          timeout: TIMEOUTS.short
+        });
 
-        try{
+      } catch (err) {
 
+        bodyText = '';
 
-          const locator =
+      }
 
-            page
+      for (const pattern of zeroResultPatterns) {
 
-              .locator(selector)
+        if (pattern.test(bodyText)) {
 
-              .first();
+          log(
+            'INFO',
+            `Meta explicitly indicates no ads were found (${pattern}).`
+          );
 
+          return true;
 
+        }
 
+      }
 
-          const visible =
+      // ---------------------------------------------------------------------
+      // Check for actual result signals
+      // ---------------------------------------------------------------------
 
-            await locator
+      let detectedSignal = null;
 
-              .isVisible({
+      for (const locator of resultSignals) {
 
-                timeout:3000
+        try {
 
-              })
+          const visible = await locator
+            .isVisible({
+              timeout: 1500
+            })
+            .catch(() => false);
 
-              .catch(()=>false);
+          if (visible) {
 
-
-
-
-          if(visible){
-
-
-
-            log(
-
-              'INFO',
-
-              `Ad results detected using selector: ${selector}`
-
-            );
-
-
-
-            adFound = true;
-
+            detectedSignal = locator;
 
             break;
 
           }
 
-
-
-        }catch{
-
+        } catch (err) {
 
           continue;
 
@@ -980,81 +994,147 @@ async function waitForAds(page) {
 
       }
 
+      // ---------------------------------------------------------------------
+      // Additional validation:
+      //
+      // We require an actual "Library ID" signal or multiple ad-like
+      // containers before declaring that ads exist.
+      // ---------------------------------------------------------------------
 
+      let libraryIdCount = 0;
 
+      try {
 
-      if(!adFound){
+        libraryIdCount = await page
+          .getByText(/Library ID/i)
+          .count();
 
+      } catch (err) {
 
+        libraryIdCount = 0;
 
-        const timestamp = Date.now();
+      }
 
+      let articleCount = 0;
 
+      try {
 
+        articleCount = await page
+          .locator('div[role="article"]')
+          .count();
 
-        await page.screenshot({
+      } catch (err) {
 
-          path:
+        articleCount = 0;
 
-            `logs/screenshots/no-ad-results-${timestamp}.png`,
+      }
 
-          fullPage:true
+      let adCardCount = 0;
 
-        }).catch(()=>{});
+      try {
 
+        adCardCount =
+          await page
+            .locator('[data-testid*="ad-card"], [data-testid*="AdCard"]')
+            .count();
 
+      } catch (err) {
 
+        adCardCount = 0;
 
+      }
 
-        await fs.promises.writeFile(
+      // ---------------------------------------------------------------------
+      // Strongest confirmation:
+      // Library ID exists.
+      // ---------------------------------------------------------------------
 
-          `logs/html/no-ad-results-${timestamp}.html`,
+      if (libraryIdCount > 0) {
 
-          await page.content(),
+        log(
+          'INFO',
+          `Ad results detected: ${libraryIdCount} Library ID signal(s).`
+        );
 
-          'utf8'
+        return true;
 
-        ).catch(()=>{});
+      }
 
+      // ---------------------------------------------------------------------
+      // Alternative confirmation:
+      // Multiple actual article/ad-card containers.
+      // ---------------------------------------------------------------------
 
+      if (articleCount > 0 || adCardCount > 0) {
 
+        log(
+          'INFO',
+          `Potential ad results detected (articles: ${articleCount}, ad cards: ${adCardCount}).`
+        );
 
+        return true;
 
-        throw new Error(
+      }
 
-          'No Meta ad result cards detected'
+      // ---------------------------------------------------------------------
+      // Generic signals alone are NOT enough.
+      // ---------------------------------------------------------------------
 
+      if (detectedSignal) {
+
+        log(
+          'INFO',
+          'Meta results page detected, but no confirmed ad cards/Library IDs yet. Continuing to wait.'
         );
 
       }
 
+      // ---------------------------------------------------------------------
+      // No confirmed ads.
+      // ---------------------------------------------------------------------
 
+      const timestamp = Date.now();
 
+      await page.screenshot({
 
-      return true;
+        path:
+          `logs/screenshots/no-ad-results-${timestamp}.png`,
 
+        fullPage: true
 
+      }).catch(() => {});
+
+      await fs.promises.writeFile(
+
+        `logs/html/no-ad-results-${timestamp}.html`,
+
+        await page.content(),
+
+        'utf8'
+
+      ).catch(() => {});
+
+      throw new Error(
+        'No confirmed Meta ad result cards or Library IDs detected'
+      );
 
     },
 
     {
 
+      label: 'waitForAds',
 
-      label:'waitForAds',
+      maxAttempts: RETRY.maxAttempts,
 
-      maxAttempts:RETRY.maxAttempts,
+      delayMs: RETRY.delayMs,
 
-      delayMs:RETRY.delayMs,
-
-      fallback:false
+      fallback: false
 
     }
 
   );
 
-}
-
-// ---------------------------------------------------------------------------
+}// ---------------------------------------------------------------------------
 // 6. scrollUntilStable(page)
 // ---------------------------------------------------------------------------
 
