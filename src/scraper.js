@@ -5,30 +5,31 @@
  * ---------------------------------------------------------------------------
  * Orchestration Module
  *
- * Responsibilities:
- * - Bootstrap required project directories (output, logs, assets, reports,
- *   output/network)
- * - Initialize/update output/ads.json with run status
- * - Read competitor list (and target country) from config/competitors.json
- * - Launch a realistic desktop Chromium browser via Playwright
- * - Delegate ALL Meta Ad Library interaction to ./metaAdLibrary
- * - Attach ./networkInterceptor once per page to passively capture Meta
- *   Ad Library GraphQL/XHR traffic alongside the DOM-driven workflow
- * - Delegate DOM ad extraction to ./parser
- * - Extract and normalize GraphQL ad objects from captured network traffic
- * - Merge DOM-extracted ads with GraphQL-extracted ads via ./dataMerger
- * - Loop through competitors, search each brand, wait for ads, scroll
- *   until the feed stabilizes, extract + merge, log results
- * - Persist captured network traffic per competitor for pagination/edge
- *   counts and DOM-failure debugging
- * - Cleanly shut down the browser
+ * Pipeline (per competitor):
+ *   Reset network capture
+ *     -> Close popups
+ *     -> Select Country -> India
+ *     -> Select Ad Category -> All ads
+ *     -> Search competitor name
+ *     -> Wait for results
+ *     -> Scroll until stable
+ *     -> Parser -> DOM ads
+ *     -> NetworkInterceptor -> GraphQL ads
+ *     -> dataMerger.js
+ *     -> downloader.js
+ *     -> Save output
+ *
+ * Country and Ad Category are re-applied on every competitor iteration
+ * (not just once at session start), since Meta can reset these filters
+ * between searches.
  *
  * This module intentionally contains NO Meta Ad Library navigation logic
  * and NO DOM parsing logic. All page-level interaction (launch, cookies,
- * country selection, search, waiting for ads, scrolling, popups) lives in
- * ./metaAdLibrary; all DOM extraction lives in ./parser; all GraphQL/XHR
- * capture lives in ./networkInterceptor; all dataset merging lives in
- * ./dataMerger. This module only wires them together.
+ * country/category selection, search, waiting for ads, scrolling, popups)
+ * lives in ./metaAdLibrary; all DOM extraction lives in ./parser; all
+ * GraphQL/XHR capture lives in ./networkInterceptor; all dataset merging
+ * lives in ./dataMerger; all asset downloading lives in ./downloader.
+ * This module only wires them together.
  *
  * Usage:
  * node src/scraper.js
@@ -48,6 +49,11 @@ const {
   attachNetworkInterceptor,
   getCapturedResponses,
   clearCapturedResponses,
+  // Optional: if ./networkInterceptor exports its own extraction function,
+  // it is preferred over the local extractGraphQLAds() fallback below.
+  // Destructuring an export that doesn't exist simply yields `undefined`
+  // here — it does not throw — so this stays safe either way.
+  extractAdsFromResponses: networkInterceptorExtractAdsFromResponses,
 } = require('./networkInterceptor');
 
 // ---------------------------------------------------------------------------
@@ -68,6 +74,7 @@ const PATHS = {
 };
 
 const DEFAULT_COUNTRY = 'India';
+const DEFAULT_AD_CATEGORY = 'All ads';
 
 const REALISTIC_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
@@ -351,10 +358,9 @@ async function createPage(context) {
 /**
  * Attaches ./networkInterceptor to the page exactly once, before any
  * navigation happens, so it captures GraphQL/XHR traffic from the very
- * first request onward (including whatever traffic country selection
- * triggers, ahead of the first competitor search). Never throws —
- * network capture is a diagnostic aid, not a critical-path dependency,
- * so a failure here should not abort the scraper run.
+ * first request onward. Never throws — network capture is a diagnostic
+ * aid, not a critical-path dependency, so a failure here should not
+ * abort the scraper run.
  *
  * @param {import('playwright').Page} page
  * @returns {Promise<void>}
@@ -419,8 +425,13 @@ async function captureNetworkForCompetitor(competitor) {
 }
 
 // ---------------------------------------------------------------------------
-// GraphQL extraction: recursively walk captured network payloads and
-// normalize any Meta-Ad-shaped object found within them
+// GraphQL extraction (local fallback): recursively walk captured network
+// payloads and normalize any Meta-Ad-shaped object found within them.
+//
+// This is used ONLY if ./networkInterceptor does not export its own
+// extractAdsFromResponses(). If it does, that implementation is preferred
+// (see processCompetitor below) since GraphQL parsing conceptually
+// belongs to the module that captured the traffic in the first place.
 // ---------------------------------------------------------------------------
 
 /**
@@ -609,7 +620,7 @@ function normalizeGraphQLAd(raw) {
 }
 
 /**
- * extractGraphQLAds(responses)
+ * extractGraphQLAds(responses) — local fallback implementation
  * ---------------------------------------------------------------------------
  * Pure JavaScript, no Playwright code. Recursively walks every captured
  * network response payload, collects every object that looks like a Meta
@@ -685,18 +696,40 @@ function extractGraphQLAds(responses) {
   return deduped;
 }
 
+/**
+ * Resolves GraphQL ads for a competitor: prefers
+ * networkInterceptor.extractAdsFromResponses() if that export exists
+ * (GraphQL parsing conceptually belongs with the module that captured
+ * the traffic), falling back to the local extractGraphQLAds() above
+ * otherwise. Never throws — either path failing falls through to [].
+ *
+ * @param {Array<object>} responses
+ * @returns {Array<object>}
+ */
+function resolveGraphQLAds(responses) {
+  if (typeof networkInterceptorExtractAdsFromResponses === 'function') {
+    try {
+      return networkInterceptorExtractAdsFromResponses(responses) || [];
+    } catch (err) {
+      // Fall through to local implementation on unexpected failure.
+    }
+  }
+
+  return extractGraphQLAds(responses);
+}
+
 // ---------------------------------------------------------------------------
 // Orchestration: process a single competitor
-// (search -> wait for ads -> scroll until stable -> DOM extract ->
-//  network capture -> GraphQL extract -> merge)
+// (reset network capture -> close popups -> select country -> select ad
+//  category -> search -> wait for ads -> scroll until stable -> DOM
+//  extract -> GraphQL extract -> merge -> download assets)
 // ---------------------------------------------------------------------------
 
 /**
- * Runs the full per-competitor workflow: search, wait for ads, scroll
- * until the feed stabilizes (delegated to ./metaAdLibrary), extract DOM
- * ads (delegated to ./parser), persist + summarize captured network
- * traffic, extract and normalize GraphQL ads from that traffic, and
- * merge both datasets (delegated to ./dataMerger).
+ * Runs the full per-competitor workflow. Country and Ad Category filters
+ * are re-applied on EVERY competitor iteration (not just once at session
+ * start), since Meta can reset these filters between searches — this
+ * mirrors the exact pipeline order specified for this project.
  *
  * Network capture is cleared before the competitor starts and persisted
  * after — on both the success and failure paths — since network traffic
@@ -705,12 +738,13 @@ function extractGraphQLAds(responses) {
  * result object.
  *
  * Backward compatible by construction: if no GraphQL ads are found in
- * the captured traffic, extractGraphQLAds() simply returns [], and
+ * the captured traffic, resolveGraphQLAds() simply returns [], and
  * dataMerger.mergeAds(domAds, []) is called as usual — the scraper never
  * fails just because GraphQL data wasn't available.
  *
  * @param {import('playwright').Page} page
  * @param {string} competitor
+ * @param {string} country
  * @returns {Promise<{
  *   competitor: string,
  *   success: boolean,
@@ -720,20 +754,45 @@ function extractGraphQLAds(responses) {
  *   error?: string
  * }>}
  */
-async function processCompetitor(page, competitor) {
-  // Reset the network buffer so this competitor's persisted capture
-  // doesn't include traffic from a previous competitor (or from the
-  // pre-loop launch/cookie/country-selection steps).
+async function processCompetitor(page, competitor, country) {
+  // -----------------------------------------------------------------
+  // 1. Reset network capture for this competitor
+  // -----------------------------------------------------------------
   clearCapturedResponses();
 
   try {
+    await Logger.info(`Starting competitor: "${competitor}"`);
+
+    // -----------------------------------------------------------------
+    // 2. Dismiss any popup that may be present
+    // -----------------------------------------------------------------
     await metaAdLibrary.closePopups(page);
 
+    // -----------------------------------------------------------------
+    // 3. SELECT COUNTRY — must happen BEFORE competitor search
+    // -----------------------------------------------------------------
+    await Logger.info(`Setting country filter to "${country}" for "${competitor}"`);
+    await metaAdLibrary.selectCountry(page, country);
+    await page.waitForTimeout(1500);
+
+    // -----------------------------------------------------------------
+    // 4. SELECT AD CATEGORY — "All ads", BEFORE competitor search
+    // -----------------------------------------------------------------
+    await Logger.info(`Setting ad category filter to "${DEFAULT_AD_CATEGORY}" for "${competitor}"`);
+    await metaAdLibrary.selectAdCategory(page, DEFAULT_AD_CATEGORY);
+    await page.waitForTimeout(1500);
+
+    // -----------------------------------------------------------------
+    // 5. NOW SEARCH COMPETITOR
+    // -----------------------------------------------------------------
     const searchSucceeded = await metaAdLibrary.searchBrand(page, competitor);
     if (!searchSucceeded) {
-      throw new Error('Search submission failed or results did not load');
+      throw new Error(`Search submission failed for competitor "${competitor}"`);
     }
 
+    // -----------------------------------------------------------------
+    // 6. WAIT FOR RESULTS
+    // -----------------------------------------------------------------
     await metaAdLibrary.closePopups(page);
 
     const adsFound = await metaAdLibrary.waitForAds(page);
@@ -741,38 +800,44 @@ async function processCompetitor(page, competitor) {
       throw new Error('No ad cards became visible within retry window');
     }
 
-    // Load the FULL result set before parsing — Meta virtualizes the
-    // feed and only renders a viewport's worth of cards at a time.
+    // -----------------------------------------------------------------
+    // 7. SCROLL UNTIL RESULTS STABILIZE
+    // -----------------------------------------------------------------
     await metaAdLibrary.scrollUntilStable(page);
 
-    // --- DOM extraction (delegated to ./parser — unchanged) ---
-    const extraction = await parser.extractAds(page, competitor);
+    // -----------------------------------------------------------------
+    // 8. DOM EXTRACTION (delegated to ./parser)
+    // -----------------------------------------------------------------
+    const domResult = await parser.extractAds(page, competitor);
+    // Defensive: accept either a bare array or a { ads, stats } shape,
+    // in case parser.extractAds's return contract ever changes.
+    const domAds = Array.isArray(domResult) ? domResult : domResult?.ads || [];
+    const extractionStats = Array.isArray(domResult) ? {} : domResult?.stats || {};
 
-    // --- Network capture: persist + summarize what was captured ---
+    // -----------------------------------------------------------------
+    // 9. GRAPHQL EXTRACTION (persist + summarize, then extract)
+    // -----------------------------------------------------------------
     const network = await captureNetworkForCompetitor(competitor);
 
-    // --- GraphQL extraction: normalize ad objects out of the raw
-    // captured responses (pure JS, no Playwright/DOM involved) ---
     const rawResponses = getCapturedResponses();
-    const graphqlAds = extractGraphQLAds(rawResponses);
+    const graphqlAds = resolveGraphQLAds(rawResponses);
 
     await Logger.info(
       `Extracted ${graphqlAds.length} GraphQL ad(s) for "${competitor}" from ${rawResponses.length} captured response(s)`
     );
 
-    // --- Merge DOM ads + GraphQL ads (delegated to ./dataMerger) ---
-    // If graphqlAds is empty, this is equivalent to
-    // dataMerger.mergeAds(extraction.ads, []) — the scraper continues to
-    // work exactly as before using DOM ads only.
-    const merged = dataMerger.mergeAds(extraction.ads, graphqlAds);
-    // --- Asset download: fetch every image/video referenced in the
-    // merged ads (delegated to ./downloader). Wrapped defensively so a
-    // download-layer problem never turns an otherwise-successful
-    // competitor result into a failure — downloader.js is designed to
-    // never throw, but this guards against any unexpected surprise.
+    // -----------------------------------------------------------------
+    // 10. MERGE DOM + GRAPHQL (delegated to ./dataMerger)
+    // -----------------------------------------------------------------
+    const merged = dataMerger.mergeAds(domAds, graphqlAds);
+    const mergedAds = merged?.ads || [];
+
+    // -----------------------------------------------------------------
+    // 11. DOWNLOAD MEDIA (delegated to ./downloader)
+    // -----------------------------------------------------------------
     let assetStats = { downloadedImages: 0, downloadedVideos: 0, skipped: 0, failed: [] };
     try {
-      assetStats = await downloader.downloadAssets(merged.ads, PATHS.assets);
+      assetStats = await downloader.downloadAssets(mergedAds, PATHS.assets);
       await Logger.info(
         `Downloaded assets for "${competitor}": ${assetStats.downloadedImages} image(s), ` +
           `${assetStats.downloadedVideos} video(s), ${assetStats.skipped} skipped, ` +
@@ -782,38 +847,21 @@ async function processCompetitor(page, competitor) {
       await Logger.warn(`Asset download failed unexpectedly for "${competitor}": ${err.message}`);
     }
 
+    // -----------------------------------------------------------------
+    // 12. RESULT
+    // -----------------------------------------------------------------
     await Logger.info(
-      `Successfully processed competitor: "${competitor}" - ${merged.ads.length} merged ad(s)`
+      `Successfully processed competitor: "${competitor}" - ${mergedAds.length} merged ad(s)`
     );
 
     return {
       competitor,
       success: true,
-      ads: merged.ads,
+      ads: mergedAds,
       stats: {
-        ...extraction.stats,
-        ...merged.stats,
+        ...extractionStats,
+        ...(merged?.stats || {}),
         assets: assetStats,
-        network: {
-          responseCount: network.responseCount,
-          edgeCount: network.edgeCount,
-          hasNextPage: network.hasNextPage,
-        },
-      },
-      network,
-    };
-
-    await Logger.info(
-      `Successfully processed competitor: "${competitor}" - ${merged.ads.length} merged ad(s)`
-    );
-
-    return {
-      competitor,
-      success: true,
-      ads: merged.ads,
-      stats: {
-        ...extraction.stats,
-        ...merged.stats,
         network: {
           responseCount: network.responseCount,
           edgeCount: network.edgeCount,
@@ -852,13 +900,14 @@ async function processCompetitor(page, competitor) {
  *
  * @param {import('playwright').Page} page
  * @param {string[]} competitors
+ * @param {string} country
  * @returns {Promise<Array<{ competitor: string, success: boolean, ads: object[], stats?: object, error?: string, network?: object }>>}
  */
-async function processCompetitors(page, competitors) {
+async function processCompetitors(page, competitors, country) {
   const results = [];
 
   for (const competitor of competitors) {
-    const result = await processCompetitor(page, competitor);
+    const result = await processCompetitor(page, competitor, country);
     results.push(result);
 
     // Persist progress incrementally so partial results are never lost
@@ -898,10 +947,11 @@ async function closeBrowser(browser) {
 
 /**
  * Main orchestration function for the scraper module. Sets up the
- * environment, launches the browser, delegates Meta Ad Library
- * interaction to ./metaAdLibrary, attaches network capture, processes
- * each competitor, and ensures a clean shutdown regardless of success or
- * failure.
+ * environment, launches the browser, attaches network capture, opens
+ * Meta Ad Library and accepts cookies ONCE, then processes each
+ * competitor (which re-applies country/category filters, searches,
+ * waits, scrolls, extracts, merges, and downloads per iteration), and
+ * ensures a clean shutdown regardless of success or failure.
  */
 async function main() {
   let browser;
@@ -916,17 +966,17 @@ async function main() {
     const context = await createBrowserContext(browser);
     const page = await createPage(context);
 
-    // Attach network capture before any navigation, so it's in place for
-    // whatever traffic country selection triggers ahead of the first
-    // competitor search.
+    // Attach network capture before any navigation.
     await attachNetworkCapture(page);
 
-    // --- Meta Ad Library interaction is fully delegated ---
+    // --- One-time session setup: open the library, accept cookies.
+    // Country and Ad Category are NOT selected here — they are
+    // re-applied per competitor inside processCompetitor(), per the
+    // required pipeline order. ---
     await metaAdLibrary.launch(page);
     await metaAdLibrary.acceptCookies(page);
-    await metaAdLibrary.selectCountry(page, country);
 
-    const results = await processCompetitors(page, competitors);
+    const results = await processCompetitors(page, competitors, country);
 
     const overallStatus = results.every((r) => r.success) ? 'completed' : 'completed_with_errors';
     await updateAdsOutput(overallStatus, results);
@@ -958,6 +1008,7 @@ module.exports = {
   attachNetworkCapture,
   captureNetworkForCompetitor,
   extractGraphQLAds,
+  resolveGraphQLAds,
   processCompetitor,
   processCompetitors,
   closeBrowser,
