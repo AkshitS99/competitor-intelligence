@@ -1054,7 +1054,81 @@ async function waitForAds(page) {
 
 }
 
+// ---------------------------------------------------------------------------
+// 6. scrollUntilStable(page)
+// ---------------------------------------------------------------------------
 
+async function scrollUntilStable(page) {
+  try {
+    log('INFO', 'Starting scroll until Meta Ad Library results stabilize...');
+
+    let previousHeight = 0;
+    let stableCount = 0;
+
+    const maxScrolls = 30;
+    const stableRequired = 3;
+
+    for (let i = 0; i < maxScrolls; i++) {
+      const currentHeight = await page.evaluate(() => {
+        return Math.max(
+          document.body.scrollHeight,
+          document.documentElement.scrollHeight
+        );
+      });
+
+      if (currentHeight === previousHeight) {
+        stableCount += 1;
+
+        log(
+          'INFO',
+          `Page height stable (${stableCount}/${stableRequired})`
+        );
+
+        if (stableCount >= stableRequired) {
+          log(
+            'INFO',
+            'Meta Ad Library results stabilized. Scrolling complete.'
+          );
+
+          return true;
+        }
+      } else {
+        stableCount = 0;
+
+        log(
+          'INFO',
+          `Scroll ${i + 1}/${maxScrolls}: page height ${currentHeight}px`
+        );
+      }
+
+      previousHeight = currentHeight;
+
+      await page.evaluate(() => {
+        window.scrollTo({
+          top: document.body.scrollHeight,
+          behavior: 'instant'
+        });
+      });
+
+      await page.waitForTimeout(1500);
+    }
+
+    log(
+      'WARN',
+      `Reached maximum scroll limit (${maxScrolls}) before full stabilization.`
+    );
+
+    return true;
+
+  } catch (err) {
+    log(
+      'WARN',
+      `scrollUntilStable encountered issue: ${err.message}`
+    );
+
+    return false;
+  }
+}
 
 
 
