@@ -287,6 +287,63 @@ async function launch(page) {
 
 }
 
+// ---------------------------------------------------------------------------
+// 1b. navigateToCompetitorUrl(page, competitorUrl)
+// ---------------------------------------------------------------------------
+
+async function navigateToCompetitorUrl(page, competitorUrl) {
+  if (!competitorUrl || typeof competitorUrl !== 'string') {
+    log(
+      'ERROR',
+      'navigateToCompetitorUrl called without a valid competitor URL'
+    );
+
+    return false;
+  }
+
+  try {
+    log(
+      'INFO',
+      `Navigating directly to competitor Meta Ad Library URL: ${competitorUrl}`
+    );
+
+    await page.goto(
+      competitorUrl,
+      {
+        waitUntil: 'domcontentloaded',
+        timeout: TIMEOUTS.navigation
+      }
+    );
+
+    await page.waitForTimeout(TIMEOUTS.stability);
+
+    log(
+      'INFO',
+      `Competitor Meta Ad Library page loaded. Current URL: ${page.url()}`
+    );
+
+    await page.screenshot({
+      path: `logs/screenshots/competitor-page-${Date.now()}.png`,
+      fullPage: true
+    }).catch(() => {});
+
+    await fs.promises.writeFile(
+      `logs/html/competitor-page-${Date.now()}.html`,
+      await page.content(),
+      'utf8'
+    ).catch(() => {});
+
+    return true;
+
+  } catch (err) {
+    log(
+      'ERROR',
+      `Failed to navigate to competitor Meta Ad Library URL: ${err.message}`
+    );
+
+    return false;
+  }
+}
 
 
 
@@ -550,596 +607,49 @@ async function closePopups(page){
   }
 
 }
-// ---------------------------------------------------------------------------
-// 3. selectCountry(page, country)
-// ---------------------------------------------------------------------------
 
-async function selectCountry(page, country = 'India') {
-  if (!country || typeof country !== 'string') {
-    log('WARN', 'selectCountry called without a valid country. Skipping.');
-    return false;
-  }
+// -----------------------------------------------------------------
+// 2. NAVIGATE DIRECTLY TO COMPETITOR META AD LIBRARY URL
+// -----------------------------------------------------------------
 
-  try {
-    log('INFO', `Selecting country filter: ${country}`);
+await Logger.info(
+  `Navigating directly to Meta Ad Library URL for "${competitor}"`
+);
 
-    // Find possible country/filter controls.
-    const selectors = [
-      'button:has-text("Country")',
-      '[role="button"]:has-text("Country")',
-      '[aria-label*="Country"]',
-      '[aria-label*="country"]',
-      'div[role="button"]:has-text("Country")'
-    ];
+const navigationSucceeded =
+  await metaAdLibrary.navigateToCompetitorUrl(
+    page,
+    competitorUrl
+  );
 
-    let control = null;
-
-    for (const selector of selectors) {
-      const locator = page.locator(selector).first();
-
-      if (
-        await locator.isVisible({ timeout: 1500 }).catch(() => false)
-      ) {
-        control = locator;
-        log(
-          'INFO',
-          `Country filter found using selector: ${selector}`
-        );
-        break;
-      }
-    }
-
-    // If the direct selector did not work, inspect buttons containing
-    // country-related text.
-    if (!control) {
-      const buttons = page.getByRole('button');
-      const count = await buttons.count();
-
-      for (let i = 0; i < count; i++) {
-        const button = buttons.nth(i);
-
-        if (
-          !(await button.isVisible().catch(() => false))
-        ) {
-          continue;
-        }
-
-        const text = (
-          await button.innerText().catch(() => '')
-        ).trim();
-
-        if (/country|india|all countries/i.test(text)) {
-          control = button;
-
-          log(
-            'INFO',
-            `Country filter found from button text: "${text}"`
-          );
-
-          break;
-        }
-      }
-    }
-
-    if (!control) {
-      throw new Error(
-        `Unable to locate Meta country filter for "${country}"`
-      );
-    }
-
-    await control.click({
-      timeout: TIMEOUTS.short
-    });
-
-    await page.waitForTimeout(700);
-
-    // Search within the opened country menu if a search field exists.
-    const searchCandidates = [
-      'input[placeholder*="Search"]',
-      'input[placeholder*="search"]',
-      'input[aria-label*="Search"]',
-      'input[aria-label*="search"]'
-    ];
-
-    for (const selector of searchCandidates) {
-      const input = page.locator(selector).first();
-
-      if (
-        await input.isVisible({ timeout: 1000 }).catch(() => false)
-      ) {
-        await input.fill(country).catch(() => {});
-        await page.waitForTimeout(700);
-        break;
-      }
-    }
-
-    // Locate India / requested country.
-    const optionCandidates = [
-      page.getByRole('option', { name: country, exact: true }).first(),
-      page.getByText(country, { exact: true }).first(),
-      page.getByText(country, { exact: false }).first()
-    ];
-
-    let option = null;
-
-    for (const candidate of optionCandidates) {
-      if (
-        await candidate.isVisible({ timeout: 1500 }).catch(() => false)
-      ) {
-        option = candidate;
-        break;
-      }
-    }
-
-    if (!option) {
-      throw new Error(
-        `Country option "${country}" was not found after opening country filter`
-      );
-    }
-
-    await option.click({
-      timeout: TIMEOUTS.short
-    });
-
-    await page.waitForTimeout(1000);
-
-    // Verification.
-    const pageText = await page.locator('body').innerText().catch(() => '');
-
-    if (
-      new RegExp(`\\b${country.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
-        .test(pageText)
-    ) {
-      log(
-        'INFO',
-        `Country filter successfully set to: ${country}`
-      );
-    } else {
-      log(
-        'WARN',
-        `Country "${country}" was clicked, but selection could not be independently verified.`
-      );
-    }
-
-    return true;
-
-  } catch (err) {
-    log(
-      'ERROR',
-      `Failed to select country "${country}": ${err.message}`
-    );
-
-    return false;
-  }
+if (!navigationSucceeded) {
+  throw new Error(
+    `Failed to navigate to Meta Ad Library URL for "${competitor}"`
+  );
 }
 
-// ---------------------------------------------------------------------------
-// 4. selectAdCategory(page, category)
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------
+// 3. ACCEPT COOKIES / CLOSE POPUPS
+// -----------------------------------------------------------------
 
-async function selectAdCategory(page, category = 'All ads') {
-  if (!category || typeof category !== 'string') {
-    log(
-      'WARN',
-      'selectAdCategory called without a valid category. Skipping.'
-    );
+await metaAdLibrary.acceptCookies(page);
 
-    return false;
-  }
+await metaAdLibrary.closePopups(page);
 
-  try {
-    log(
-      'INFO',
-      `Selecting ad category filter: ${category}`
-    );
+await page.waitForTimeout(1500);
 
-    const selectors = [
-      'button:has-text("Ad category")',
-      'button:has-text("Ad Categories")',
-      '[role="button"]:has-text("Ad category")',
-      '[role="button"]:has-text("Ad Categories")',
-      '[aria-label*="Ad category"]',
-      '[aria-label*="ad category"]',
-      '[aria-label*="Ad Categories"]',
-      '[aria-label*="ad categories"]'
-    ];
+// -----------------------------------------------------------------
+// 4. WAIT FOR RESULTS
+// -----------------------------------------------------------------
 
-    let control = null;
+const adsFound = await metaAdLibrary.waitForAds(page);
 
-    // First attempt: direct selectors.
-    for (const selector of selectors) {
-      const locator = page.locator(selector).first();
-
-      if (
-        await locator.isVisible({ timeout: 1500 }).catch(() => false)
-      ) {
-        control = locator;
-
-        log(
-          'INFO',
-          `Ad category filter found using selector: ${selector}`
-        );
-
-        break;
-      }
-    }
-
-    // Second attempt: inspect visible buttons.
-    if (!control) {
-      const buttons = page.getByRole('button');
-      const count = await buttons.count();
-
-      for (let i = 0; i < count; i++) {
-        const button = buttons.nth(i);
-
-        if (
-          !(await button.isVisible().catch(() => false))
-        ) {
-          continue;
-        }
-
-        const text = (
-          await button.innerText().catch(() => '')
-        ).trim();
-
-        if (/ad\s*categor/i.test(text)) {
-          control = button;
-
-          log(
-            'INFO',
-            `Ad category filter found from button text: "${text}"`
-          );
-
-          break;
-        }
-      }
-    }
-
-    if (!control) {
-      throw new Error(
-        `Unable to locate Meta Ad Category filter`
-      );
-    }
-
-    await control.click({
-      timeout: TIMEOUTS.short
-    });
-
-    await page.waitForTimeout(700);
-
-    // Locate "All ads".
-    const optionCandidates = [
-      page.getByRole('option', {
-        name: category,
-        exact: true
-      }).first(),
-
-      page.getByText(category, {
-        exact: true
-      }).first(),
-
-      page.getByText(category, {
-        exact: false
-      }).first()
-    ];
-
-    let option = null;
-
-    for (const candidate of optionCandidates) {
-      if (
-        await candidate.isVisible({
-          timeout: 1500
-        }).catch(() => false)
-      ) {
-        option = candidate;
-        break;
-      }
-    }
-
-    if (!option) {
-      throw new Error(
-        `Ad category option "${category}" was not found`
-      );
-    }
-
-    await option.click({
-      timeout: TIMEOUTS.short
-    });
-
-    await page.waitForTimeout(1000);
-
-    log(
-      'INFO',
-      `Ad category filter successfully selected: ${category}`
-    );
-
-    return true;
-
-  } catch (err) {
-    log(
-      'ERROR',
-      `Failed to select ad category "${category}": ${err.message}`
-    );
-
-    return false;
-  }
+if (!adsFound) {
+  throw new Error(
+    `No ad results could be confirmed for "${competitor}"`
+  );
 }
-
-// 5. searchBrand(page, brand)
-// ---------------------------------------------------------------------------
-
-async function searchBrand(page, brand) {
-
-  return withRetry(
-
-    async () => {
-
-      log(
-        'INFO',
-        `Searching advertiser: ${brand}`
-      );
-
-      // ---------------------------------------------------------------------
-      // STEP 1: Look for an already-visible editable input
-      // ---------------------------------------------------------------------
-
-      const inputSelectors = [
-        'input[placeholder*="Search"]',
-        'input[placeholder*="search"]',
-        'input[aria-label*="Search"]',
-        'input[aria-label*="search"]',
-        'input[type="search"]',
-        'input[type="text"]',
-        'textarea[placeholder*="Search"]',
-        'textarea[placeholder*="search"]'
-      ];
-
-      let searchInput = null;
-
-      for (const selector of inputSelectors) {
-
-        try {
-
-          const locator = page.locator(selector).first();
-
-          if (await locator.count() === 0) {
-            continue;
-          }
-
-          const visible = await locator
-            .isVisible({ timeout: 1500 })
-            .catch(() => false);
-
-          if (!visible) {
-            continue;
-          }
-
-          const editable = await locator
-            .isEditable({ timeout: 1500 })
-            .catch(() => false);
-
-          if (!editable) {
-            continue;
-          }
-
-          searchInput = locator;
-
-          log(
-            'INFO',
-            `Search input found using selector: ${selector}`
-          );
-
-          break;
-
-        } catch (err) {
-          continue;
-        }
-      }
-
-      // ---------------------------------------------------------------------
-      // STEP 2: If input isn't available, click Meta's combobox
-      // ---------------------------------------------------------------------
-
-      if (!searchInput) {
-
-        try {
-
-          const comboboxes = page.getByRole('combobox');
-
-          const count = await comboboxes.count();
-
-          log(
-            'INFO',
-            `Found ${count} combobox element(s) while locating search.`
-          );
-
-          for (let i = 0; i < count; i++) {
-
-            const combobox = comboboxes.nth(i);
-
-            const visible = await combobox
-              .isVisible({ timeout: 1500 })
-              .catch(() => false);
-
-            if (!visible) {
-              continue;
-            }
-
-            log(
-              'INFO',
-              `Clicking visible Meta combobox ${i + 1}/${count} to activate search.`
-            );
-
-            await combobox.click({
-              timeout: TIMEOUTS.short
-            }).catch(() => {});
-
-            // Give Meta time to render the real input.
-            await page.waitForTimeout(500);
-
-            // ---------------------------------------------------------------
-            // Search again for actual editable input
-            // ---------------------------------------------------------------
-
-            for (const selector of inputSelectors) {
-
-              try {
-
-                const locator = page.locator(selector).first();
-
-                if (await locator.count() === 0) {
-                  continue;
-                }
-
-                const visible = await locator
-                  .isVisible({ timeout: 1000 })
-                  .catch(() => false);
-
-                if (!visible) {
-                  continue;
-                }
-
-                const editable = await locator
-                  .isEditable({ timeout: 1000 })
-                  .catch(() => false);
-
-                if (!editable) {
-                  continue;
-                }
-
-                searchInput = locator;
-
-                log(
-                  'INFO',
-                  `Search input became available after activating combobox: ${selector}`
-                );
-
-                break;
-
-              } catch (err) {
-                continue;
-              }
-            }
-
-            if (searchInput) {
-              break;
-            }
-          }
-
-        } catch (err) {
-
-          log(
-            'WARN',
-            `Failed to activate Meta search combobox: ${err.message}`
-          );
-
-        }
-      }
-
-      // ---------------------------------------------------------------------
-      // STEP 3: Final fallback — search for contenteditable
-      // ---------------------------------------------------------------------
-
-      if (!searchInput) {
-
-        try {
-
-          const contentEditable = page
-            .locator('[contenteditable="true"]')
-            .first();
-
-          const visible = await contentEditable
-            .isVisible({ timeout: 1500 })
-            .catch(() => false);
-
-          if (visible) {
-
-            searchInput = contentEditable;
-
-            log(
-              'INFO',
-              'Search input found using contenteditable fallback.'
-            );
-
-          }
-
-        } catch (err) {
-
-          // Ignore and continue to diagnostics.
-
-        }
-      }
-
-      // ---------------------------------------------------------------------
-      // STEP 4: Give up only after all methods fail
-      // ---------------------------------------------------------------------
-
-      if (!searchInput) {
-
-        const timestamp = Date.now();
-
-        await page.screenshot({
-          path:
-            `logs/screenshots/search-input-not-found-${timestamp}.png`,
-          fullPage: true
-        }).catch(() => {});
-
-        await fs.promises.writeFile(
-          `logs/html/search-input-not-found-${timestamp}.html`,
-          await page.content(),
-          'utf8'
-        ).catch(() => {});
-
-        throw new Error(
-          `Unable to locate an editable Meta Ad Library search input for "${brand}"`
-        );
-      }
-
-      // ---------------------------------------------------------------------
-      // STEP 5: Clear existing search
-      // ---------------------------------------------------------------------
-
-      await searchInput.click({
-        timeout: TIMEOUTS.short
-      });
-
-      await searchInput.fill('', {
-        timeout: TIMEOUTS.short
-      });
-
-      // ---------------------------------------------------------------------
-      // STEP 6: Enter competitor name
-      // ---------------------------------------------------------------------
-
-      await searchInput.fill(
-        brand,
-        {
-          timeout: TIMEOUTS.short
-        }
-      );
-
-      log(
-        'INFO',
-        `Entered advertiser name: ${brand}`
-      );
-
-      // ---------------------------------------------------------------------
-      // STEP 7: Submit search
-      // ---------------------------------------------------------------------
-
-      await page.waitForTimeout(1000);
-
-      await searchInput.press('Enter').catch(async () => {
-
-        await page.keyboard.press('Enter');
-
-      });
-
-      log(
-        'INFO',
-        `Search submitted successfully for advertiser: ${brand}`
-      );
-
+  
       // ---------------------------------------------------------------------
       // STEP 8: Allow results page to load
       // ---------------------------------------------------------------------
@@ -1540,6 +1050,7 @@ async function scrollUntilStable(page) {
 
 module.exports = {
   launch,
+  navigateToCompetitorUrl,
   acceptCookies,
   selectCountry,
   selectAdCategory,
