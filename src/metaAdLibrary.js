@@ -5,13 +5,14 @@
  * ---------------------------------------------------------------------------
  * Meta Ad Library Navigation Module
  *
- * Responsible for:
- * - Navigation
- * - Cookie/consent handling
- * - Country selection
- * - Brand search
- * - Waiting for ad results
- * - Popup dismissal
+ * Responsible for, in pipeline order:
+ * 1. Navigation (launch)
+ * 2. Cookie/consent handling + popup dismissal
+ * 3. Country selection
+ * 4. Ad category / filter selection
+ * 5. Brand search
+ * 6. Waiting for ad results
+ * 7. Scrolling until the results feed stabilizes
  *
  * Does NOT:
  * - Analyse ads
@@ -290,7 +291,7 @@ async function launch(page) {
 
 
 // ---------------------------------------------------------------------------
-// 2. acceptCookies(page)
+// 2a. acceptCookies(page)
 // ---------------------------------------------------------------------------
 
 async function acceptCookies(page) {
@@ -408,6 +409,149 @@ async function acceptCookies(page) {
   }
 
 }
+
+
+// ---------------------------------------------------------------------------
+// 2b. closePopups(page)
+// ---------------------------------------------------------------------------
+// Grouped immediately after acceptCookies since, per the required
+// pipeline, "accept cookies" and "close popups" are one combined setup
+// step (step 2) that runs before country/filter selection.
+// ---------------------------------------------------------------------------
+
+async function closePopups(page){
+
+
+  const dismissTexts = [
+
+    'Close',
+
+    'Not Now',
+
+    'Not now',
+
+    'Dismiss',
+
+    'No Thanks',
+
+    '×',
+
+    '✕'
+
+  ];
+
+
+
+
+  try{
+
+
+    for(const text of dismissTexts){
+
+
+
+      const button =
+
+        page
+
+          .getByRole(
+
+            'button',
+
+            {
+              name:text
+            }
+
+          )
+
+          .or(
+
+            page.getByLabel(text)
+
+          )
+
+          .first();
+
+
+
+
+
+      const visible =
+
+        await button
+
+          .isVisible({
+
+            timeout:TIMEOUTS.short
+
+          })
+
+          .catch(()=>false);
+
+
+
+
+
+      if(visible){
+
+
+
+        await button
+
+          .click({
+
+            timeout:TIMEOUTS.short
+
+          })
+
+          .catch(()=>{});
+
+
+
+
+
+        log(
+
+          'INFO',
+
+          `Dismissed popup using control labeled "${text}"`
+
+        );
+
+
+      }
+
+
+    }
+
+
+
+
+
+    await page.keyboard.press('Escape').catch(()=>{});
+
+
+
+
+
+  }catch(err){
+
+
+
+    log(
+
+      'WARN',
+
+      `closePopups encountered issue: ${err.message}`
+
+    );
+
+
+  }
+
+}
+
+
 // ---------------------------------------------------------------------------
 // 3. selectCountry(page, country)
 // ---------------------------------------------------------------------------
@@ -588,8 +732,175 @@ async function selectCountry(page, country) {
 
 }
 
+
 // ---------------------------------------------------------------------------
-// 4. searchBrand(page, brand)
+// 4. setSearchFilters(page, country)
+// ---------------------------------------------------------------------------
+// Applies the two top-level Meta Ad Library filters in one step: Country
+// and Ad Category ("All ads"). This is a broader, more resilient
+// alternative/complement to selectCountry() above — it tries several
+// role/aria-label candidate selectors for each filter control before
+// giving up, and never throws (a filter that can't be located or
+// selected is logged as a WARN and skipped, so the scraper can continue
+// with Meta's default filter state rather than aborting the run).
+// ---------------------------------------------------------------------------
+
+async function setSearchFilters(page, country = 'India') {
+
+  try {
+
+    log(
+      'INFO',
+      `Setting Meta Ad Library filters: Country="${country}", Ad Category="All ads"`
+    );
+
+    // ---------------------------------------------------------
+    // 1. COUNTRY
+    // ---------------------------------------------------------
+
+    const countryCandidates = [
+      page.getByRole('button', { name: /country/i }),
+      page.getByRole('combobox', { name: /country/i }),
+      page.locator('[aria-label*="Country" i]').first(),
+      page.locator('[aria-label*="country" i]').first()
+    ];
+
+    let countryControl = null;
+
+    for (const candidate of countryCandidates) {
+
+      if (
+        await candidate.isVisible({ timeout: 1500 }).catch(() => false)
+      ) {
+        countryControl = candidate;
+        break;
+      }
+
+    }
+
+    if (countryControl) {
+
+      await countryControl.click().catch(() => {});
+
+      await page.waitForTimeout(500);
+
+      // Try searching/selecting India
+      const countrySearch = page.locator(
+        'input[placeholder*="Search" i], input[aria-label*="Search" i]'
+      ).first();
+
+      if (
+        await countrySearch.isVisible({ timeout: 1500 }).catch(() => false)
+      ) {
+        await countrySearch.fill(country).catch(() => {});
+        await page.waitForTimeout(500);
+      }
+
+      const indiaOption = page
+        .getByText(country, { exact: true })
+        .first();
+
+      if (
+        await indiaOption.isVisible({ timeout: 3000 }).catch(() => false)
+      ) {
+        await indiaOption.click().catch(() => {});
+        log('INFO', `Country successfully selected: ${country}`);
+      } else {
+        log('WARN', `Could not find country option: ${country}`);
+      }
+
+    } else {
+
+      log('WARN', 'Country selector not found.');
+
+    }
+
+    await page.waitForTimeout(1000);
+
+    // ---------------------------------------------------------
+    // 2. AD CATEGORY
+    // ---------------------------------------------------------
+
+    const categoryCandidates = [
+      page.getByRole('button', { name: /ad category/i }),
+      page.getByRole('combobox', { name: /ad category/i }),
+      page.locator('[aria-label*="Ad category" i]').first(),
+      page.locator('[aria-label*="Category" i]').first()
+    ];
+
+    let categoryControl = null;
+
+    for (const candidate of categoryCandidates) {
+
+      if (
+        await candidate.isVisible({ timeout: 1500 }).catch(() => false)
+      ) {
+        categoryControl = candidate;
+        break;
+      }
+
+    }
+
+    if (categoryControl) {
+
+      await categoryControl.click().catch(() => {});
+
+      await page.waitForTimeout(500);
+
+      const allAdsOptionCandidates = [
+        page.getByText('All ads', { exact: true }).first(),
+        page.getByText('All Ads', { exact: true }).first(),
+        page.getByText(/All ads/i).first()
+      ];
+
+      let allAdsOption = null;
+
+      for (const candidate of allAdsOptionCandidates) {
+
+        if (
+          await candidate.isVisible({ timeout: 2000 }).catch(() => false)
+        ) {
+          allAdsOption = candidate;
+          break;
+        }
+
+      }
+
+      if (allAdsOption) {
+        await allAdsOption.click().catch(() => {});
+        log('INFO', 'Ad category successfully selected: All ads');
+      } else {
+        log('WARN', 'Could not find "All ads" option.');
+      }
+
+    } else {
+
+      log('WARN', 'Ad Category selector not found.');
+
+    }
+
+    await page.waitForTimeout(1000);
+
+    log('INFO', 'Meta Ad Library filters applied.');
+
+    return true;
+
+  } catch (err) {
+
+    log(
+      'WARN',
+      `setSearchFilters encountered issue: ${err.message}`
+    );
+
+    return false;
+
+  }
+
+}
+
+
+// ---------------------------------------------------------------------------
+// 5. searchBrand(page, brand)
 // ---------------------------------------------------------------------------
 
 async function searchBrand(page, brand) {
@@ -892,7 +1203,7 @@ async function searchBrand(page, brand) {
 }
 
 // ---------------------------------------------------------------------------
-// 5. waitForAds(page)
+// 6. waitForAds(page)
 // ---------------------------------------------------------------------------
 
 async function waitForAds(page) {
@@ -1182,7 +1493,7 @@ async function waitForAds(page) {
 
 
 // ---------------------------------------------------------------------------
-// 6. scrollUntilStable(page)
+// 7. scrollUntilStable(page)
 // ---------------------------------------------------------------------------
 
 async function scrollUntilStable(page) {
@@ -1258,147 +1569,6 @@ async function scrollUntilStable(page) {
 }
 
 
-
-// ---------------------------------------------------------------------------
-// 6. closePopups(page)
-// ---------------------------------------------------------------------------
-
-async function closePopups(page){
-
-
-  const dismissTexts = [
-
-    'Close',
-
-    'Not Now',
-
-    'Not now',
-
-    'Dismiss',
-
-    'No Thanks',
-
-    '×',
-
-    '✕'
-
-  ];
-
-
-
-
-  try{
-
-
-    for(const text of dismissTexts){
-
-
-
-      const button =
-
-        page
-
-          .getByRole(
-
-            'button',
-
-            {
-              name:text
-            }
-
-          )
-
-          .or(
-
-            page.getByLabel(text)
-
-          )
-
-          .first();
-
-
-
-
-
-      const visible =
-
-        await button
-
-          .isVisible({
-
-            timeout:TIMEOUTS.short
-
-          })
-
-          .catch(()=>false);
-
-
-
-
-
-      if(visible){
-
-
-
-        await button
-
-          .click({
-
-            timeout:TIMEOUTS.short
-
-          })
-
-          .catch(()=>{});
-
-
-
-
-
-        log(
-
-          'INFO',
-
-          `Dismissed popup using control labeled "${text}"`
-
-        );
-
-
-      }
-
-
-    }
-
-
-
-
-
-    await page.keyboard.press('Escape').catch(()=>{});
-
-
-
-
-
-  }catch(err){
-
-
-
-    log(
-
-      'WARN',
-
-      `closePopups encountered issue: ${err.message}`
-
-    );
-
-
-  }
-
-}
-
-
-
-
-
 // ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
@@ -1406,13 +1576,12 @@ async function closePopups(page){
 module.exports = {
 
 
- launch,
-    acceptCookies,
-    selectCountry,
-    closePopups,
-    searchBrand,
-    waitForAds,
-    scrollUntilStable
-
-
+  launch,
+  acceptCookies,
+  selectCountry,
+  setSearchFilters,
+  closePopups,
+  searchBrand,
+  waitForAds,
+  scrollUntilStable
 };
