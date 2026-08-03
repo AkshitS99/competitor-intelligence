@@ -1,11 +1,13 @@
 {
-  "brand": "AIS Windows",
   "country": "India",
-  "language": "en",
-  "adStatus": "active",
-  "mediaType": "all",
   "competitors": [
-    "Asahi India Glass Ltd - AIS",
-    "Fenesta"
+    {
+      "name": "Asahi India Glass Ltd - AIS",
+      "url": "https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=IN&is_targeted_country=false&media_type=all&search_type=page&sort_data[direction]=desc&sort_data[mode]=total_impressions&view_all_page_id=482543091811001"
+    },
+    {
+      "name": "Fenesta",
+      "url": "https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=IN&is_targeted_country=false&media_type=all&search_type=page&sort_data[direction]=desc&sort_data[mode]=total_impressions&view_all_page_id=190037801030877"
+    }
   ]
 }
