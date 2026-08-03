@@ -556,351 +556,456 @@ async function closePopups(page){
 // 3. selectCountry(page, country)
 // ---------------------------------------------------------------------------
 
-async function selectCountry(page, country) {
-
-
-  if(!country || typeof country !== 'string') {
-
-
-    log(
-
-      'WARN',
-
-      'selectCountry called without valid country. Skipping.'
-
-    );
-
-
-    return;
-
+async function selectCountry(page, country = 'India') {
+  if (!page) {
+    log('WARN', 'selectCountry called without a valid page.');
+    return false;
   }
 
-
+  const targetCountry =
+    typeof country === 'string' && country.trim()
+      ? country.trim()
+      : 'India';
 
   try {
-
-
-    const countryControl =
-
-      page
-
-        .getByRole('combobox',{name:/country/i})
-
-        .or(
-
-          page.getByRole('button',{name:/country/i})
-
-        )
-
-        .first();
-
-
-
-
-    const visible =
-
-      await countryControl
-
-        .isVisible({
-
-          timeout:TIMEOUTS.short
-
-        })
-
-        .catch(()=>false);
-
-
-
-
-    if(!visible){
-
-
-      log(
-
-        'INFO',
-
-        'Country selector not found on page. Continuing with default/current country.'
-
-      );
-
-
-      return;
-
-    }
-
-
-
-
-    await countryControl.click().catch(()=>{});
-
-
-
-
-    const searchInput =
-
-      page.getByRole('textbox').first();
-
-
-
-
-    if(
-
-      await searchInput
-
-        .isVisible({
-
-          timeout:TIMEOUTS.short
-
-        })
-
-        .catch(()=>false)
-
-    ){
-
-
-      await searchInput
-
-        .fill(country)
-
-        .catch(()=>{});
-
-
-
-      await page.waitForTimeout(500);
-
-    }
-
-
-
-
-    const option =
-
-      page
-
-        .getByText(country,{exact:false})
-
-        .first();
-
-
-
-
-    if(
-
-      await option
-
-        .isVisible({
-
-          timeout:TIMEOUTS.short
-
-        })
-
-        .catch(()=>false)
-
-    ){
-
-
-      await option.click().catch(()=>{});
-
-
-
-      log(
-
-        'INFO',
-
-        `Selected country: ${country}`
-
-      );
-
-
-    }
-
-
-
-  } catch(err) {
-
-
-    log(
-
-      'WARN',
-
-      `selectCountry encountered issue: ${err.message}`
-
+    log('INFO', `Selecting country: ${targetCountry}`);
+
+    // Give Meta a moment to finish rendering the filter controls.
+    await page.waitForTimeout(1000);
+
+    // -----------------------------------------------------------------------
+    // Find a visible country-related control.
+    // We deliberately inspect all comboboxes/buttons instead of assuming
+    // the first [role="combobox"] is the country selector.
+    // -----------------------------------------------------------------------
+
+    const controls = page.locator(
+      '[role="combobox"], [role="button"], button'
     );
 
-
-  }
-
-}
-
-
-// ---------------------------------------------------------------------------
-// 4. setSearchFilters(page, country)
-// ---------------------------------------------------------------------------
-// Applies the two top-level Meta Ad Library filters in one step: Country
-// and Ad Category ("All ads"). This is a broader, more resilient
-// alternative/complement to selectCountry() above — it tries several
-// role/aria-label candidate selectors for each filter control before
-// giving up, and never throws (a filter that can't be located or
-// selected is logged as a WARN and skipped, so the scraper can continue
-// with Meta's default filter state rather than aborting the run).
-// ---------------------------------------------------------------------------
-
-async function setSearchFilters(page, country = 'India') {
-
-  try {
-
-    log(
-      'INFO',
-      `Setting Meta Ad Library filters: Country="${country}", Ad Category="All ads"`
-    );
-
-    // ---------------------------------------------------------
-    // 1. COUNTRY
-    // ---------------------------------------------------------
-
-    const countryCandidates = [
-      page.getByRole('button', { name: /country/i }),
-      page.getByRole('combobox', { name: /country/i }),
-      page.locator('[aria-label*="Country" i]').first(),
-      page.locator('[aria-label*="country" i]').first()
-    ];
+    const count = await controls.count();
 
     let countryControl = null;
 
-    for (const candidate of countryCandidates) {
+    for (let i = 0; i < count; i++) {
+      const control = controls.nth(i);
+
+      const visible = await control
+        .isVisible({ timeout: 1000 })
+        .catch(() => false);
+
+      if (!visible) continue;
+
+      const text = await control
+        .innerText()
+        .catch(() => '');
+
+      const ariaLabel = await control
+        .getAttribute('aria-label')
+        .catch(() => '');
+
+      const title = await control
+        .getAttribute('title')
+        .catch(() => '');
+
+      const combined = `${text} ${ariaLabel} ${title}`.toLowerCase();
 
       if (
-        await candidate.isVisible({ timeout: 1500 }).catch(() => false)
+        combined.includes('country') ||
+        combined.includes('location') ||
+        combined.includes('india')
       ) {
-        countryControl = candidate;
+        countryControl = control;
+
+        log(
+          'INFO',
+          `Found country filter control: "${(text || ariaLabel || title || '').trim()}"`
+        );
+
         break;
       }
-
     }
 
-    if (countryControl) {
+    // -----------------------------------------------------------------------
+    // Fallback: search for visible text that indicates the current country.
+    // -----------------------------------------------------------------------
 
-      await countryControl.click().catch(() => {});
-
-      await page.waitForTimeout(500);
-
-      // Try searching/selecting India
-      const countrySearch = page.locator(
-        'input[placeholder*="Search" i], input[aria-label*="Search" i]'
-      ).first();
-
-      if (
-        await countrySearch.isVisible({ timeout: 1500 }).catch(() => false)
-      ) {
-        await countrySearch.fill(country).catch(() => {});
-        await page.waitForTimeout(500);
-      }
-
-      const indiaOption = page
-        .getByText(country, { exact: true })
-        .first();
-
-      if (
-        await indiaOption.isVisible({ timeout: 3000 }).catch(() => false)
-      ) {
-        await indiaOption.click().catch(() => {});
-        log('INFO', `Country successfully selected: ${country}`);
-      } else {
-        log('WARN', `Could not find country option: ${country}`);
-      }
-
-    } else {
-
-      log('WARN', 'Country selector not found.');
-
-    }
-
-    await page.waitForTimeout(1000);
-
-    // ---------------------------------------------------------
-    // 2. AD CATEGORY
-    // ---------------------------------------------------------
-
-    const categoryCandidates = [
-      page.getByRole('button', { name: /ad category/i }),
-      page.getByRole('combobox', { name: /ad category/i }),
-      page.locator('[aria-label*="Ad category" i]').first(),
-      page.locator('[aria-label*="Category" i]').first()
-    ];
-
-    let categoryControl = null;
-
-    for (const candidate of categoryCandidates) {
-
-      if (
-        await candidate.isVisible({ timeout: 1500 }).catch(() => false)
-      ) {
-        categoryControl = candidate;
-        break;
-      }
-
-    }
-
-    if (categoryControl) {
-
-      await categoryControl.click().catch(() => {});
-
-      await page.waitForTimeout(500);
-
-      const allAdsOptionCandidates = [
-        page.getByText('All ads', { exact: true }).first(),
-        page.getByText('All Ads', { exact: true }).first(),
-        page.getByText(/All ads/i).first()
+    if (!countryControl) {
+      const countryTextCandidates = [
+        'India',
+        'Country',
+        'Location',
+        'All countries',
       ];
 
-      let allAdsOption = null;
-
-      for (const candidate of allAdsOptionCandidates) {
+      for (const text of countryTextCandidates) {
+        const candidate = page.getByText(text, { exact: true }).first();
 
         if (
-          await candidate.isVisible({ timeout: 2000 }).catch(() => false)
+          await candidate
+            .isVisible({ timeout: 1000 })
+            .catch(() => false)
         ) {
-          allAdsOption = candidate;
+          countryControl = candidate;
+
+          log(
+            'INFO',
+            `Found country control using visible text: "${text}"`
+          );
+
           break;
         }
-
       }
-
-      if (allAdsOption) {
-        await allAdsOption.click().catch(() => {});
-        log('INFO', 'Ad category successfully selected: All ads');
-      } else {
-        log('WARN', 'Could not find "All ads" option.');
-      }
-
-    } else {
-
-      log('WARN', 'Ad Category selector not found.');
-
     }
 
-    await page.waitForTimeout(1000);
+    if (!countryControl) {
+      log(
+        'WARN',
+        'Could not locate country filter control. Continuing without changing country.'
+      );
 
-    log('INFO', 'Meta Ad Library filters applied.');
+      return false;
+    }
+
+    // -----------------------------------------------------------------------
+    // Open country dropdown.
+    // -----------------------------------------------------------------------
+
+    await countryControl
+      .scrollIntoViewIfNeeded()
+      .catch(() => {});
+
+    await countryControl
+      .click({ timeout: TIMEOUTS.short })
+      .catch(async () => {
+        await countryControl.click({ force: true });
+      });
+
+    await page.waitForTimeout(700);
+
+    // -----------------------------------------------------------------------
+    // If a search field appears inside the dropdown, use it.
+    // -----------------------------------------------------------------------
+
+    const dropdownInputs = page.locator(
+      'input[placeholder*="Search"], ' +
+      'input[placeholder*="search"], ' +
+      'input[aria-label*="Search"], ' +
+      'input[aria-label*="search"], ' +
+      '[role="dialog"] input, ' +
+      '[role="listbox"] input'
+    );
+
+    const inputCount = await dropdownInputs.count();
+
+    let countrySearchInput = null;
+
+    for (let i = 0; i < inputCount; i++) {
+      const input = dropdownInputs.nth(i);
+
+      if (
+        await input
+          .isVisible({ timeout: 500 })
+          .catch(() => false)
+      ) {
+        countrySearchInput = input;
+        break;
+      }
+    }
+
+    if (countrySearchInput) {
+      await countrySearchInput
+        .fill(targetCountry)
+        .catch(() => {});
+
+      await page.waitForTimeout(700);
+    }
+
+    // -----------------------------------------------------------------------
+    // Select the country.
+    // -----------------------------------------------------------------------
+
+    const countryCandidates = [
+      page.getByText(targetCountry, { exact: true }),
+      page.getByRole('option', { name: targetCountry, exact: true }),
+      page.getByRole('button', { name: targetCountry, exact: true }),
+      page.getByText(targetCountry, { exact: false }),
+    ];
+
+    let selected = false;
+
+    for (const candidate of countryCandidates) {
+      const candidateCount = await candidate.count().catch(() => 0);
+
+      for (let i = 0; i < candidateCount; i++) {
+        const option = candidate.nth(i);
+
+        if (
+          await option
+            .isVisible({ timeout: 1000 })
+            .catch(() => false)
+        ) {
+          await option
+            .scrollIntoViewIfNeeded()
+            .catch(() => {});
+
+          await option
+            .click({ timeout: TIMEOUTS.short })
+            .catch(async () => {
+              await option.click({ force: true }).catch(() => {});
+            });
+
+          selected = true;
+
+          log(
+            'INFO',
+            `Selected country: ${targetCountry}`
+          );
+
+          break;
+        }
+      }
+
+      if (selected) break;
+    }
+
+    if (!selected) {
+      log(
+        'WARN',
+        `Country option "${targetCountry}" was not found after opening the country filter.`
+      );
+
+      await page.keyboard.press('Escape').catch(() => {});
+
+      return false;
+    }
+
+    // Allow Meta to apply the filter.
+    await page.waitForTimeout(1000);
 
     return true;
 
   } catch (err) {
-
     log(
       'WARN',
-      `setSearchFilters encountered issue: ${err.message}`
+      `selectCountry encountered issue: ${err.message}`
     );
 
     return false;
+  }
+}
+// ---------------------------------------------------------------------------
+// 4. selectAdCategory(page, category)
+// ---------------------------------------------------------------------------
 
+async function selectAdCategory(page, category = 'All ads') {
+  if (!page) {
+    log('WARN', 'selectAdCategory called without a valid page.');
+    return false;
   }
 
-}
+  const targetCategory =
+    typeof category === 'string' && category.trim()
+      ? category.trim()
+      : 'All ads';
 
+  try {
+    log('INFO', `Selecting ad category: ${targetCategory}`);
 
-// ---------------------------------------------------------------------------
-// 5. searchBrand(page, brand)
+    await page.waitForTimeout(700);
+
+    // -----------------------------------------------------------------------
+    // Find the Ad Category / Ad Type filter.
+    // -----------------------------------------------------------------------
+
+    const controls = page.locator(
+      '[role="combobox"], [role="button"], button'
+    );
+
+    const count = await controls.count();
+
+    let categoryControl = null;
+
+    for (let i = 0; i < count; i++) {
+      const control = controls.nth(i);
+
+      const visible = await control
+        .isVisible({ timeout: 1000 })
+        .catch(() => false);
+
+      if (!visible) continue;
+
+      const text = await control
+        .innerText()
+        .catch(() => '');
+
+      const ariaLabel = await control
+        .getAttribute('aria-label')
+        .catch(() => '');
+
+      const title = await control
+        .getAttribute('title')
+        .catch(() => '');
+
+      const combined = `${text} ${ariaLabel} ${title}`.toLowerCase();
+
+      if (
+        combined.includes('ad category') ||
+        combined.includes('ad type') ||
+        combined.includes('ads category') ||
+        combined.includes('ads type') ||
+        combined.includes('all ads')
+      ) {
+        categoryControl = control;
+
+        log(
+          'INFO',
+          `Found ad category control: "${(text || ariaLabel || title || '').trim()}"`
+        );
+
+        break;
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Fallback: look for "Ad category", "Ad type", or "All ads".
+    // -----------------------------------------------------------------------
+
+    if (!categoryControl) {
+      const candidates = [
+        page.getByText('Ad category', { exact: true }),
+        page.getByText('Ad type', { exact: true }),
+        page.getByText('All ads', { exact: true }),
+        page.getByText('Ad Category', { exact: true }),
+        page.getByText('Ad Type', { exact: true }),
+      ];
+
+      for (const candidate of candidates) {
+        if (
+          await candidate
+            .isVisible({ timeout: 1000 })
+            .catch(() => false)
+        ) {
+          categoryControl = candidate;
+
+          log('INFO', 'Found ad category control using visible text.');
+
+          break;
+        }
+      }
+    }
+
+    if (!categoryControl) {
+      log(
+        'WARN',
+        'Could not locate ad category filter control. Continuing without changing category.'
+      );
+
+      return false;
+    }
+
+    // -----------------------------------------------------------------------
+    // Open category dropdown.
+    // -----------------------------------------------------------------------
+
+    await categoryControl
+      .scrollIntoViewIfNeeded()
+      .catch(() => {});
+
+    await categoryControl
+      .click({ timeout: TIMEOUTS.short })
+      .catch(async () => {
+        await categoryControl.click({ force: true });
+      });
+
+    await page.waitForTimeout(500);
+
+    // -----------------------------------------------------------------------
+    // Select "All ads".
+    // -----------------------------------------------------------------------
+
+    const categoryCandidates = [
+      page.getByRole('option', {
+        name: targetCategory,
+        exact: true,
+      }),
+
+      page.getByText(targetCategory, {
+        exact: true,
+      }),
+
+      page.getByRole('button', {
+        name: targetCategory,
+        exact: true,
+      }),
+
+      page.getByText(targetCategory, {
+        exact: false,
+      }),
+    ];
+
+    let selected = false;
+
+    for (const candidate of categoryCandidates) {
+      const candidateCount = await candidate.count().catch(() => 0);
+
+      for (let i = 0; i < candidateCount; i++) {
+        const option = candidate.nth(i);
+
+        if (
+          await option
+            .isVisible({ timeout: 1000 })
+            .catch(() => false)
+        ) {
+          await option
+            .scrollIntoViewIfNeeded()
+            .catch(() => {});
+
+          await option
+            .click({ timeout: TIMEOUTS.short })
+            .catch(async () => {
+              await option.click({ force: true }).catch(() => {});
+            });
+
+          selected = true;
+
+          log(
+            'INFO',
+            `Selected ad category: ${targetCategory}`
+          );
+
+          break;
+        }
+      }
+
+      if (selected) break;
+    }
+
+    if (!selected) {
+      log(
+        'WARN',
+        `Ad category option "${targetCategory}" was not found.`
+      );
+
+      await page.keyboard.press('Escape').catch(() => {});
+
+      return false;
+    }
+
+    // Allow Meta to apply the filter.
+    await page.waitForTimeout(1000);
+
+    return true;
+
+  } catch (err) {
+    log(
+      'WARN',
+      `selectAdCategory encountered issue: ${err.message}`
+    );
+
+    return false;
+  }
+}// 5. searchBrand(page, brand)
 // ---------------------------------------------------------------------------
 
 async function searchBrand(page, brand) {
@@ -1574,14 +1679,12 @@ async function scrollUntilStable(page) {
 // ---------------------------------------------------------------------------
 
 module.exports = {
-
-
   launch,
   acceptCookies,
   selectCountry,
-  setSearchFilters,
+  selectAdCategory,
   closePopups,
   searchBrand,
   waitForAds,
-  scrollUntilStable
+  scrollUntilStable,
 };
